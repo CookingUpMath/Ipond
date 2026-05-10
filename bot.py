@@ -680,7 +680,7 @@ async def setchampionvc(interaction: discord.Interaction, channel: discord.Voice
     embed.description = (
         "# 🎧 Champion VC Updated\n"
         f"-# New VC: **{channel.name}**\n"
-        "-# Champion will receive 👑 in nickname when they win"
+    
     )
 
     await interaction.response.send_message(embed=embed)

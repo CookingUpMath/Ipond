@@ -394,6 +394,15 @@ async def daily_reset_loop():
                 winner_member = guild.get_member(winner_id)
                 if winner_member:
                     await apply_champion_role(guild, winner_member)
+                            
+                # Update bot status to show the new champion
+                await bot.change_presence(
+                activity=discord.Activity(
+                type=discord.ActivityType.playing,
+                name=f"👑 {winner_member.display_name}"
+                 )
+                )
+
 
                 # Announce winner
                 if settings["announce_channel_id"]:

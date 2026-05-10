@@ -102,7 +102,10 @@ async def on_message(message):
             if not is_allowed:
                 try:
                     await message.delete()
-                    await message.channel.send(f"{message.author.mention} 🙂 Mimed users can only send emojis, stickers, or GIFs!", delete_after=5)
+                    await message.channel.send(
+                        f"{message.author.mention} 🙊 Mimed users can only send emojis, stickers, or GIFs!",
+                        delete_after=5
+                    )
                 except:
                     pass
                 return
@@ -140,11 +143,9 @@ async def daily_reset():
             winner = guild.get_member(int(winner_id))
             
             if winner:
-                # Update overall wins
                 wins = guild_data.setdefault("overall_wins", {})
                 wins[winner_id] = wins.get(winner_id, 0) + 1
                 
-                # Update champion role
                 champ_role_id = guild_data.get("champion_role_id")
                 if champ_role_id:
                     role = guild.get_role(int(champ_role_id))
@@ -155,13 +156,11 @@ async def daily_reset():
                         if role not in winner.roles:
                             await winner.add_roles(role)
                 
-                # Update status
                 await bot.change_presence(activity=discord.Activity(
                     type=discord.ActivityType.watching,
                     name=f"👑 {winner.display_name}"
                 ))
                 
-                # Announce
                 ch_id = guild_data.get("announce_channel_id")
                 if ch_id:
                     ch = guild.get_channel(int(ch_id))
@@ -171,7 +170,6 @@ async def daily_reset():
                         embed.set_thumbnail(url=winner.display_avatar.url)
                         await ch.send(embed=embed)
         
-        # Reset daily states
         mimed_user = None
         mime_until = None
         cursed_user = None
@@ -181,112 +179,50 @@ async def daily_reset():
         
         save_data(data)
 
-# ===== Commands =====
-@tree.command(name="stats", description="Show your Top Duck wins and crown stats")
-async def stats(interaction: discord.Interaction, user: discord.Member = None):
-    target = user or interaction.user
-    data = load_data()
-    guild_data = get_guild_data(data, interaction.guild.id)
-    
-    uid = str(target.id)
-    wins = guild_data.get("overall_wins", {}).get(uid, 0)
-    crown_uses = guild_data.get("crown_uses_count", {}).get(uid, 0)
-    cursed_count = guild_data.get("cursed_victims", {}).get(uid, 0)
-    mimed_count = guild_data.get("mimed_victims", {}).get(uid, 0)
-    jester_count = guild_data.get("jester_victims", {}).get(uid, 0)
-    
-    today = get_today_key(guild_data.get("timezone", "UTC"))
-    messages_today = guild_data.get("daily_counts", {}).get(today, {}).get(uid, 0)
-    
+# ===== Core Commands =====
+@tree.command(name="setup", description="Initial server setup")
+@app_commands.default_permissions(administrator=True)
+async def setup(interaction: discord.Interaction):
     embed = discord.Embed(
-        title=f"📊 Stats for {target.display_name}",
-        color=0x3498DB
+        title="🦆 Top Duck Setup",
+        description="Use `/setchamprole` to set the champion role\nUse `/setchannel` to set the announcement channel\nUse `/settimezone` to set your server timezone",
+        color=0xFFD700
     )
-    embed.add_field(name="🏆 Top Duck Wins", value=f"`{wins}`", inline=True)
-    embed.add_field(name="💬 Messages Today", value=f"`{messages_today}`", inline=True)
-    embed.add_field(name="🙊", value="🙊", inline=True)
-    
-    crown_stats = f"👑: `{crown_uses}`  🤡: `{jester_count}`\n🔮: `{cursed_count}`  🙂: `{mimed_count}`"
-    embed.add_field(name="Crown Stats", value=crown_stats, inline=False)
-    
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@tree.command(name="curse", description="Curse a user - remove champion role for the day")
-async def curse(interaction: discord.Interaction, user: discord.Member):
-    global cursed_user, curse_until
-    
+@tree.command(name="setchannel", description="Set announcement channel")
+@app_commands.default_permissions(administrator=True)
+async def setchannel(interaction: discord.Interaction, channel: discord.TextChannel):
     data = load_data()
     guild_data = get_guild_data(data, interaction.guild.id)
-    champ_role_id = guild_data.get("champion_role_id")
-    
-    if not champ_role_id or not any(role.id == int(champ_role_id) for role in interaction.user.roles):
-        await interaction.response.send_message("❌ Only the current champion can use crown powers.", ephemeral=True)
-        return
-    
-    if user.bot:
-        await interaction.response.send_message("❌ You can't curse bots.", ephemeral=True)
-        return
-    
-    crown_uses = guild_data.setdefault("crown_uses", {}).setdefault(str(interaction.user.id), {})
-    if crown_uses.get("curse") == datetime.now().date().isoformat():
-        await interaction.response.send_message("❌ You've already used /curse today.", ephemeral=True)
-        return
-    
-    if cursed_user and datetime.now() < curse_until:
-        await interaction.response.send_message("❌ Someone is already cursed today.", ephemeral=True)
-        return
-    
+    guild_data["announce_channel_id"] = str(channel.id)
+    save_data(data)
+    await interaction.response.send_message(f"✅ Announcements will go to {channel.mention}", ephemeral=True)
+
+@tree.command(name="setchamprole", description="Set the champion role")
+@app_commands.default_permissions(administrator=True)
+async def setchamprole(interaction: discord.Interaction, role: discord.Role):
+    data = load_data()
+    guild_data = get_guild_data(data, interaction.guild.id)
+    guild_data["champion_role_id"] = str(role.id)
+    save_data(data)
+    await interaction.response.send_message(f"✅ Champion role set to {role.mention}", ephemeral=True)
+
+@tree.command(name="settimezone", description="Set server timezone")
+@app_commands.default_permissions(administrator=True)
+async def settimezone(interaction: discord.Interaction, timezone: str):
     try:
-        role = interaction.guild.get_role(int(champ_role_id))
-        if role in user.roles:
-            await user.remove_roles(role)
+        pytz.timezone(timezone)
     except:
-        pass
-    
-    cursed_user = user.id
-    curse_until = datetime.now().replace(hour=23, minute=59, second=59)
-    crown_uses["curse"] = datetime.now().date().isoformat()
-    
-    guild_data.setdefault("cursed_victims", {})[str(user.id)] = guild_data.setdefault("cursed_victims", {}).get(str(user.id), 0) + 1
-    guild_data.setdefault("crown_uses_count", {})[str(interaction.user.id)] = guild_data.setdefault("crown_uses_count", {}).get(str(interaction.user.id), 0) + 1
-    save_data(data)
-    
-    await interaction.response.send_message(f"🔮 {user.mention} has been cursed and stripped of the crown!")
-
-@tree.command(name="mime", description="Mime a user - they can only send emoji/sticker/GIF for 10 mins")
-async def mime(interaction: discord.Interaction, user: discord.Member):
-    global mimed_user, mime_until
+        await interaction.response.send_message("❌ Invalid timezone. Use format like `America/New_York` or `UTC`", ephemeral=True)
+        return
     
     data = load_data()
     guild_data = get_guild_data(data, interaction.guild.id)
-    champ_role_id = guild_data.get("champion_role_id")
-    
-    if not champ_role_id or not any(role.id == int(champ_role_id) for role in interaction.user.roles):
-        await interaction.response.send_message("❌ Only the current champion can use crown powers.", ephemeral=True)
-        return
-    
-    if user.bot:
-        await interaction.response.send_message("❌ You can't mime bots.", ephemeral=True)
-        return
-    
-    crown_uses = guild_data.setdefault("crown_uses", {}).setdefault(str(interaction.user.id), {})
-    if crown_uses.get("mime") == datetime.now().date().isoformat():
-        await interaction.response.send_message("❌ You've already used /mime today.", ephemeral=True)
-        return
-    
-    if mimed_user and datetime.now() < mime_until:
-        await interaction.response.send_message("❌ Someone is already mimed.", ephemeral=True)
-        return
-    
-    mimed_user = user.id
-    mime_until = datetime.now() + timedelta(minutes=10)
-    crown_uses["mime"] = datetime.now().date().isoformat()
-    
-    guild_data.setdefault("mimed_victims", {})[str(user.id)] = guild_data.setdefault("mimed_victims", {}).get(str(user.id), 0) + 1
-    guild_data.setdefault("crown_uses_count", {})[str(interaction.user.id)] = guild_data.setdefault("crown_uses_count", {}).get(str(interaction.user.id), 0) + 1
+    guild_data["timezone"] = timezone
     save_data(data)
-    
-    await interaction.response.send_message(f"🙂 {user.mention} has been mimed for 10 minutes! They can only send emojis, stickers, or GIFs.")
+    await interaction.response.send_message(f"✅ Timezone set to `{timezone}`", ephemeral=True)
+    await interaction.response.send_message(f"🙊 {user.mention} has been mimed for 10 minutes! They can only send emojis, stickers, or GIFs.")
 
 @tree.command(name="jester", description="Jester a user - change their nickname to clown emoji")
 async def jester(interaction: discord.Interaction, user: discord.Member):
@@ -328,24 +264,6 @@ async def jester(interaction: discord.Interaction, user: discord.Member):
     save_data(data)
     
     await interaction.response.send_message(f"🤡 {user.mention} has been jestered until midnight!")
-
-@tree.command(name="setchannel", description="Set announcement channel")
-@app_commands.default_permissions(administrator=True)
-async def setchannel(interaction: discord.Interaction, channel: discord.TextChannel):
-    data = load_data()
-    guild_data = get_guild_data(data, interaction.guild.id)
-    guild_data["announce_channel_id"] = str(channel.id)
-    save_data(data)
-    await interaction.response.send_message(f"✅ Announcements will go to {channel.mention}", ephemeral=True)
-
-@tree.command(name="setchamprole", description="Set the champion role")
-@app_commands.default_permissions(administrator=True)
-async def setchamprole(interaction: discord.Interaction, role: discord.Role):
-    data = load_data()
-    guild_data = get_guild_data(data, interaction.guild.id)
-    guild_data["champion_role_id"] = str(role.id)
-    save_data(data)
-    await interaction.response.send_message(f"✅ Champion role set to {role.mention}", ephemeral=True)
 
 # ===== Webserver for Railway =====
 async def handle_ping(request):

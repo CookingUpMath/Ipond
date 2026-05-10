@@ -16,7 +16,6 @@ intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-GUILD_ID = 1055252003367960646  # Your server ID (no longer used for scoping, just kept here)
 
 # Slash command tree
 tree = bot.tree
@@ -35,83 +34,85 @@ pool: asyncpg.Pool | None = None
 
 async def init_db():
     global pool
-    if pool is None:
-        pool = await asyncpg.create_pool(DATABASE_URL)
+    if pool is not None:
+        return
 
-        async with pool.acquire() as conn:
+    pool = await asyncpg.create_pool(DATABASE_URL)
 
-            # Guild settings
-            await conn.execute("""
-            CREATE TABLE IF NOT EXISTS guild_settings (
-                guild_id BIGINT PRIMARY KEY,
-                announce_channel_id BIGINT,
-                champion_vc_id BIGINT,
-                timezone_str TEXT DEFAULT 'EST',
-                reset_hour INT DEFAULT 0,
-                reset_minute INT DEFAULT 0,
-                current_champion_id BIGINT,
-                last_reset_date DATE
-            );
-            """)
+    async with pool.acquire() as conn:
 
-            # Daily message counts
-            await conn.execute("""
-            CREATE TABLE IF NOT EXISTS message_counts (
-                guild_id BIGINT,
-                user_id BIGINT,
-                count BIGINT DEFAULT 0,
-                PRIMARY KEY (guild_id, user_id)
-            );
-            """)
+        # Guild settings
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS guild_settings (
+            guild_id BIGINT PRIMARY KEY,
+            announce_channel_id BIGINT,
+            champion_vc_id BIGINT,
+            timezone_str TEXT DEFAULT 'EST',
+            reset_hour INT DEFAULT 0,
+            reset_minute INT DEFAULT 0,
+            current_champion_id BIGINT,
+            last_reset_date DATE
+        );
+        """)
 
-            # All-time wins
-            await conn.execute("""
-            CREATE TABLE IF NOT EXISTS all_time_wins (
-                guild_id BIGINT,
-                user_id BIGINT,
-                wins BIGINT DEFAULT 0,
-                PRIMARY KEY (guild_id, user_id)
-            );
-            """)
+        # Daily message counts
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS message_counts (
+            guild_id BIGINT,
+            user_id BIGINT,
+            count BIGINT DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id)
+        );
+        """)
 
-            # Crown uses
-            await conn.execute("""
-            CREATE TABLE IF NOT EXISTS crown_uses (
-                guild_id BIGINT,
-                user_id BIGINT,
-                curse_used BIGINT DEFAULT 0,
-                mime_used BIGINT DEFAULT 0,
-                jester_used BIGINT DEFAULT 0,
-                PRIMARY KEY (guild_id, user_id)
-            );
-            """)
+        # All-time wins
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS all_time_wins (
+            guild_id BIGINT,
+            user_id BIGINT,
+            wins BIGINT DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id)
+        );
+        """)
 
-            # Victim stats
-            await conn.execute("""
-            CREATE TABLE IF NOT EXISTS victim_stats (
-                guild_id BIGINT,
-                user_id BIGINT,
-                cursed BIGINT DEFAULT 0,
-                mimed BIGINT DEFAULT 0,
-                jestered BIGINT DEFAULT 0,
-                PRIMARY KEY (guild_id, user_id)
-            );
-            """)
+        # Crown uses
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS crown_uses (
+            guild_id BIGINT,
+            user_id BIGINT,
+            curse_used BIGINT DEFAULT 0,
+            mime_used BIGINT DEFAULT 0,
+            jester_used BIGINT DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id)
+        );
+        """)
 
-            # Active effects
-            await conn.execute("""
-            CREATE TABLE IF NOT EXISTS active_effects (
-                guild_id BIGINT PRIMARY KEY,
-                cursed_user BIGINT,
-                curse_until TIMESTAMP,
-                mimed_user BIGINT,
-                mime_until TIMESTAMP,
-                jester_user BIGINT,
-                jester_until TIMESTAMP
-            );
-            """)
+        # Victim stats
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS victim_stats (
+            guild_id BIGINT,
+            user_id BIGINT,
+            cursed BIGINT DEFAULT 0,
+            mimed BIGINT DEFAULT 0,
+            jestered BIGINT DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id)
+        );
+        """)
 
-        print("Database initialized and tables ensured.")
+        # Active effects
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS active_effects (
+            guild_id BIGINT PRIMARY KEY,
+            cursed_user BIGINT,
+            curse_until TIMESTAMP,
+            mimed_user BIGINT,
+            mime_until TIMESTAMP,
+            jester_user BIGINT,
+            jester_until TIMESTAMP
+        );
+        """)
+
+    print("Database initialized and tables ensured.")
 
 
 # -----------------------------------------
@@ -140,6 +141,13 @@ async def get_guild_settings(guild_id: int):
             }
 
         return dict(row)
+
+
+def get_tz(settings: dict):
+    try:
+        return pytz.timezone(settings["timezone_str"])
+    except:
+        return pytz.timezone("EST")
 
 
 # -----------------------------------------
@@ -173,13 +181,6 @@ async def on_ready():
 # -----------------------------------------
 # PART 2 — MESSAGE COUNTING + EFFECTS + RESET
 # -----------------------------------------
-
-def get_tz(settings: dict):
-    try:
-        return pytz.timezone(settings["timezone_str"])
-    except:
-        return pytz.timezone("EST")
-
 
 async def increment_message_count(guild_id: int, user_id: int):
     async with pool.acquire() as conn:
@@ -234,7 +235,6 @@ async def on_message(message: discord.Message):
     now_utc = datetime.utcnow()
 
     if effect:
-        # Handle expiry and clear expired effects
         cursed_user = effect["cursed_user"]
         curse_until = effect["curse_until"]
         mimed_user = effect["mimed_user"]
@@ -243,20 +243,20 @@ async def on_message(message: discord.Message):
         jester_until = effect["jester_until"]
 
         update_needed = False
-        new_cursed_user, new_curse_until = cursed_user, curse_until
-        new_mimed_user, new_mime_until = mimed_user, mime_until
-        new_jester_user, new_jester_until = jester_user, jester_until
 
         if curse_until and curse_until < now_utc:
-            new_cursed_user, new_curse_until = None, None
+            cursed_user = None
+            curse_until = None
             update_needed = True
 
         if mime_until and mime_until < now_utc:
-            new_mimed_user, new_mime_until = None, None
+            mimed_user = None
+            mime_until = None
             update_needed = True
 
         if jester_until and jester_until < now_utc:
-            new_jester_user, new_jester_until = None, None
+            jester_user = None
+            jester_until = None
             update_needed = True
 
         if update_needed:
@@ -271,21 +271,17 @@ async def on_message(message: discord.Message):
                         jester_until = $7
                     WHERE guild_id = $1
                 """, guild.id,
-                   new_cursed_user, new_curse_until,
-                   new_mimed_user, new_mime_until,
-                   new_jester_user, new_jester_until)
+                   cursed_user, curse_until,
+                   mimed_user, mime_until,
+                   jester_user, jester_until)
 
-            cursed_user, curse_until = new_cursed_user, new_curse_until
-            mimed_user, mime_until = new_mimed_user, new_mime_until
-            jester_user, jester_until = new_jester_user, new_jester_until
-
-        # CURSED — 30% chance to annoy (only if not expired)
+        # CURSED — 30% chance to annoy
         if cursed_user == message.author.id and curse_until and curse_until >= now_utc:
             if random.random() < 0.30:
                 await message.add_reaction("🦆")
                 await message.channel.send("quack")
 
-        # MIMED — delete message (only if not expired)
+        # MIMED — delete message
         if mimed_user == message.author.id and mime_until and mime_until >= now_utc:
             try:
                 await message.delete()
@@ -293,7 +289,7 @@ async def on_message(message: discord.Message):
                 pass
             return
 
-        # JESTER — add 🤡 to nickname (only if not expired)
+        # JESTER — add 🤡 to nickname
         if jester_user == message.author.id and jester_until and jester_until >= now_utc:
             try:
                 if "🤡" not in message.author.display_name:
@@ -687,6 +683,69 @@ async def settings_cmd(interaction: discord.Interaction):
         f"-# Current Champion: <@{settings['current_champion_id']}>"
         if settings["current_champion_id"]
         else "# ⚙️ Server Settings\n-# No champion yet."
+    )
+
+    await interaction.response.send_message(embed=embed)
+
+
+# -----------------------------------------
+# /stats
+# -----------------------------------------
+
+@tree.command(name="stats", description="View your stats or another member's stats.")
+async def stats(interaction: discord.Interaction, member: discord.Member | None = None):
+
+    guild_id = interaction.guild_id
+    target = member or interaction.user
+
+    # Daily message count
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT count FROM message_counts
+            WHERE guild_id = $1 AND user_id = $2
+        """, guild_id, target.id)
+    daily = row["count"] if row else 0
+
+    # All-time wins
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT wins FROM all_time_wins
+            WHERE guild_id = $1 AND user_id = $2
+        """, guild_id, target.id)
+    wins = row["wins"] if row else 0
+
+    # Crown uses
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT curse_used, mime_used, jester_used
+            FROM crown_uses
+            WHERE guild_id = $1 AND user_id = $2
+        """, guild_id, target.id)
+    curse_used = row["curse_used"] if row else 0
+    mime_used = row["mime_used"] if row else 0
+    jester_used = row["jester_used"] if row else 0
+    total_powers = curse_used + mime_used + jester_used
+
+    # Victim stats
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT cursed, mimed, jestered
+            FROM victim_stats
+            WHERE guild_id = $1 AND user_id = $2
+        """, guild_id, target.id)
+    cursed = row["cursed"] if row else 0
+    mimed = row["mimed"] if row else 0
+    jestered = row["jestered"] if row else 0
+
+    embed = discord.Embed(color=discord.Color.blurple())
+    embed.description = (
+        f"# 📊 {target.display_name}'s Stats\n"
+        f"🗓️ Today: **{daily}**\n"
+        f"👑 Crowned: **{wins}**\n"
+        f"⚡️ Powers: **{total_powers}**\n"
+        f"-# 🙊 Mimed: **{mime_used}**\n"
+        f"-# 🤡 Jestered: **{jester_used}**\n"
+        f"-# 🔮 Cursed: **{curse_used}**"
     )
 
     await interaction.response.send_message(embed=embed)

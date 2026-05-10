@@ -104,29 +104,29 @@ async def crown_champion(guild, guild_data):
         old_champ_id = guild_data.get("current_champion_id")
         if role:
             # Remove from old champ
-            if old_champ_id and old_champ_id!= top_user_id:
+            if old_champ_id and old_champ_id != top_user_id:
                 old_member = guild.get_member(int(old_champ_id))
                 if old_member and role in old_member.roles:
                     await old_member.remove_roles(role)
             # Add to new champ + rename
             if role not in member.roles:
                 await member.add_roles(role)
-            await role.edit(name=f"ðŸ'' {member.display_name}")
+            await role.edit(name=f"👑 {member.display_name}")
 
     # VC handling
     vc_id = guild_data.get("champion_vc_id")
     if vc_id:
         vc = guild.get_channel(int(vc_id))
         if vc and isinstance(vc, discord.VoiceChannel):
-            await vc.edit(name=f"ðŸ'': {member.display_name}")
+            await vc.edit(name=f"👑: {member.display_name}")
         else:
             # VC deleted, create new one
             overwrites = {guild.default_role: discord.PermissionOverwrite(connect=True, view_channel=True)}
-            new_vc = await guild.create_voice_channel(f"ðŸ'': {member.display_name}", overwrites=overwrites)
+            new_vc = await guild.create_voice_channel(f"👑: {member.display_name}", overwrites=overwrites)
             guild_data["champion_vc_id"] = str(new_vc.id)
 
     # Bot status
-    await bot.change_presence(activity=discord.Game(name=f"ðŸ'' {member.display_name}"))
+    await bot.change_presence(activity=discord.Game(name=f"👑 {member.display_name}"))
 
     return member
 
@@ -201,14 +201,14 @@ async def leaderboard(interaction: discord.Interaction):
         return
 
     sorted_counts = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:10]
-    medals = ["ðŸ¥‡", "ðŸ¥ˆ", "ðŸ¥‰"]
+    medals = ["🥇", "🥈", "🥉"]
 
     desc = ""
     for i, (uid, count) in enumerate(sorted_counts):
         member = interaction.guild.get_member(int(uid))
         name = member.display_name if member else f"User {uid}"
         medal = medals[i] if i < 3 else f"`{i+1}.`"
-        desc += f"{medal} **{name}** â€" {count} messages\n"
+        desc += f"{medal} **{name}** – {count} messages\n"
 
     embed = discord.Embed(title="Today's Leaderboard", description=desc, color=0xFFD700)
     await interaction.response.send_message(embed=embed)
@@ -230,7 +230,7 @@ async def overall(interaction: discord.Interaction):
     page = 0
 
     def get_page_embed(page_num):
-        medals = ["ðŸ¥‡", "ðŸ¥ˆ", "ðŸ¥‰"]
+        medals = ["🥇", "🥈", "🥉"]
         desc = ""
         start_idx = page_num * 20
         for i, (uid, count) in enumerate(pages[page_num]):
@@ -238,7 +238,7 @@ async def overall(interaction: discord.Interaction):
             name = member.display_name if member else f"User {uid}"
             idx = start_idx + i
             medal = medals[idx] if idx < 3 else f"`{idx+1}.`"
-            desc += f"{medal} **{name}** â€" {count} wins\n"
+            desc += f"{medal} **{name}** – {count} wins\n"
         embed = discord.Embed(title="All-Time Top Ducks", description=desc, color=0xFFD700)
         embed.set_footer(text=f"Page {page_num+1}/{len(pages)}")
         return embed
@@ -248,19 +248,19 @@ async def overall(interaction: discord.Interaction):
         return
 
     msg = await interaction.original_response()
-    await msg.add_reaction("â—€ï¸")
-    await msg.add_reaction("â–¶ï¸")
+    await msg.add_reaction("◀️")
+    await msg.add_reaction("▶️")
 
     def check(reaction, user):
-        return user == interaction.user and str(reaction.emoji) in ["â—€ï¸", "â–¶ï¸"] and reaction.message.id == msg.id
+        return user == interaction.user and str(reaction.emoji) in ["◀️", "▶️"] and reaction.message.id == msg.id
 
     while True:
         try:
             reaction, user = await bot.wait_for("reaction_add", timeout=60.0, check=check)
-            if str(reaction.emoji) == "â–¶ï¸" and page < len(pages) - 1:
+            if str(reaction.emoji) == "▶️" and page < len(pages) - 1:
                 page += 1
                 await msg.edit(embed=get_page_embed(page))
-            elif str(reaction.emoji) == "â—€ï¸" and page > 0:
+            elif str(reaction.emoji) == "◀️" and page > 0:
                 page -= 1
                 await msg.edit(embed=get_page_embed(page))
             await msg.remove_reaction(reaction, user)
@@ -286,7 +286,7 @@ async def setchannel(interaction: discord.Interaction, channel: discord.TextChan
     guild_data = get_guild_data(data, interaction.guild.id)
     guild_data["announce_channel_id"] = str(channel.id)
     save_data(data)
-    await interaction.response.send_message(f"âœ… Set to {channel.mention}", ephemeral=True)
+    await interaction.response.send_message(f"✅ Set to {channel.mention}", ephemeral=True)
 
 @bot.tree.command(name="setchamprole", description="Set the champion role")
 @app_commands.default_permissions(administrator=True)
@@ -295,7 +295,7 @@ async def setchamprole(interaction: discord.Interaction, role: discord.Role):
     guild_data = get_guild_data(data, interaction.guild.id)
     guild_data["champion_role_id"] = str(role.id)
     save_data(data)
-    await interaction.response.send_message(f"âœ… {role.mention} set!", ephemeral=True)
+    await interaction.response.send_message(f"✅ {role.mention} set!", ephemeral=True)
 
 @bot.tree.command(name="setchampchannel", description="Set the champion voice channel")
 @app_commands.default_permissions(administrator=True)
@@ -304,7 +304,7 @@ async def setchampchannel(interaction: discord.Interaction, channel: discord.Voi
     guild_data = get_guild_data(data, interaction.guild.id)
     guild_data["champion_vc_id"] = str(channel.id)
     save_data(data)
-    await interaction.response.send_message(f"âœ… {channel.mention} set", ephemeral=True)
+    await interaction.response.send_message(f"✅ {channel.mention} set", ephemeral=True)
 
 @bot.tree.command(name="settimezone", description="Set server timezone")
 @app_commands.default_permissions(administrator=True)
@@ -312,13 +312,13 @@ async def settimezone(interaction: discord.Interaction, timezone: str):
     try:
         ZoneInfo(timezone)
     except ZoneInfoNotFoundError:
-        await interaction.response.send_message("âŒ Invalid timezone. Use format like `America/Toronto`", ephemeral=True)
+        await interaction.response.send_message("❌ Invalid timezone. Use format like `America/Toronto`", ephemeral=True)
         return
     data = load_data()
     guild_data = get_guild_data(data, interaction.guild.id)
     guild_data["timezone_str"] = timezone
     save_data(data)
-    await interaction.response.send_message(f"âœ… Timezone set to {timezone}", ephemeral=True)
+    await interaction.response.send_message(f"✅ Timezone set to {timezone}", ephemeral=True)
 
 @bot.tree.command(name="settime", description="Set daily reset time")
 @app_commands.default_permissions(administrator=True)
@@ -327,7 +327,7 @@ async def settime(interaction: discord.Interaction, time: str):
         hour, minute = map(int, time.split(":"))
         assert 0 <= hour <= 23 and 0 <= minute <= 59
     except:
-        await interaction.response.send_message("âŒ Use 24-hour format like `00:00`", ephemeral=True)
+        await interaction.response.send_message("❌ Use 24-hour format like `00:00`", ephemeral=True)
         return
 
     data = load_data()
@@ -336,7 +336,7 @@ async def settime(interaction: discord.Interaction, time: str):
     guild_data["reset_minute"] = minute
     tz = guild_data["timezone_str"]
     save_data(data)
-    await interaction.response.send_message(f"âœ… Time set to {time} in {tz}", ephemeral=True)
+    await interaction.response.send_message(f"✅ Time set to {time} in {tz}", ephemeral=True)
 
 @bot.tree.command(name="forcereset", description="Force daily reset now")
 @app_commands.default_permissions(administrator=True)
@@ -351,14 +351,14 @@ async def forcereset(interaction: discord.Interaction):
     save_data(data)
 
     if champ:
-        await interaction.followup.send(f"ðŸ'' Crowned {champ.mention} as Top Duck", ephemeral=True)
+        await interaction.followup.send(f"👑 Crowned {champ.mention} as Top Duck", ephemeral=True)
         # Announce if channel set
         ch_id = guild_data.get("announce_channel_id")
         if ch_id:
             ch = interaction.guild.get_channel(int(ch_id))
             if ch:
                 embed = discord.Embed(color=champ.color)
-                embed.description = f"-# All hail the top chatter\n# ðŸ'' {champ.mention}"
+                embed.description = f"-# All hail the top chatter\n# 👑 {champ.mention}"
                 embed.set_thumbnail(url=champ.display_avatar.url)
                 await ch.send(embed=embed)
     else:
@@ -381,7 +381,7 @@ async def daily_reset():
         today_str = now_local.strftime("%Y-%m-%d")
 
         if (now_local.hour == reset_hour and now_local.minute == reset_minute and
-            last_reset!= today_str):
+            last_reset != today_str):
 
             guild = bot.get_guild(int(gid))
             if not guild:
@@ -399,7 +399,7 @@ async def daily_reset():
                     ch = guild.get_channel(int(ch_id))
                     if ch:
                         embed = discord.Embed(color=champ.color)
-                        embed.description = f"-# All hail the top chatter\n# ðŸ'' {champ.mention}"
+                        embed.description = f"-# All hail the top chatter\n# 👑 {champ.mention}"
                         embed.set_thumbnail(url=champ.display_avatar.url)
                         await ch.send(embed=embed)
 

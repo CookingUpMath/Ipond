@@ -374,7 +374,6 @@ async def daily_reset_loop():
 
 @tree.command(name="leaderboard", description="View the daily and all-time leaderboards.")
 async def leaderboard(interaction: discord.Interaction):
-
     guild_id = interaction.guild_id
 
     # -----------------------------
@@ -395,13 +394,17 @@ async def leaderboard(interaction: discord.Interaction):
         name = user.display_name if user else f"User {row['user_id']}"
         count = row["count"]
 
-        if i <= 3:
-            daily_lines.append(f"**{i}. {name} — {count}**")
+        if i == 1:
+            daily_lines.append(f"🥇 {name} — {count}")
+        elif i == 2:
+            daily_lines.append(f"🥈 {name} — {count}")
+        elif i == 3:
+            daily_lines.append(f"🥉 {name} — {count}")
         else:
-            daily_lines.append(f"-# {i}. {name} — {count}")
+            daily_lines.append(f"- {name} — {count}")
 
     if not daily_lines:
-        daily_lines.append("-# No messages today.")
+        daily_lines.append("- No messages today.")
 
     # -----------------------------
     # Fetch ALL-TIME leaderboard
@@ -421,23 +424,27 @@ async def leaderboard(interaction: discord.Interaction):
         name = user.display_name if user else f"User {row['user_id']}"
         wins = row["wins"]
 
-        if i <= 3:
-            all_lines.append(f"**{i}. {name} — {wins}**")
+        if i == 1:
+            all_lines.append(f"🥇 {name} — {wins}")
+        elif i == 2:
+            all_lines.append(f"🥈 {name} — {wins}")
+        elif i == 3:
+            all_lines.append(f"🥉 {name} — {wins}")
         else:
-            all_lines.append(f"-# {i}. {name} — {wins}")
+            all_lines.append(f"- {name} — {wins}")
 
     if not all_lines:
-        all_lines.append("-# No champions yet.")
+        all_lines.append("- No champions yet.")
 
     # -----------------------------
     # Build embed
     # -----------------------------
     embed = discord.Embed(color=discord.Color.gold())
     embed.description = (
-        "# 📅 Daily Leaderboard\n"
-        + "\n".join(daily_lines)
-        + "\n\n# 🏆 All-Time Leaderboard\n"
-        + "\n".join(all_lines)
+        "**🗓️ Daily Leaderboard**\n"
+        + "\n ".join(daily_lines)
+        + "\n\n**🏆 All-Time Leaderboard**\n"
+        + "\n ".join(all_lines)
     )
 
     await interaction.response.send_message(embed=embed)

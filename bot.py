@@ -401,7 +401,7 @@ async def leaderboard(interaction: discord.Interaction):
         elif i == 3:
             daily_lines.append(f"🥉 {name} — {count}")
         else:
-            daily_lines.append(f"- {name} — {count}")
+            daily_lines.append(f"▪️ {name} — {count}")
 
     if not daily_lines:
         daily_lines.append("- No messages today.")
@@ -431,7 +431,7 @@ async def leaderboard(interaction: discord.Interaction):
         elif i == 3:
             all_lines.append(f"🥉 {name} — {wins}")
         else:
-            all_lines.append(f"- {name} — {wins}")
+            all_lines.append(f"▪️ {name} — {wins}")
 
     if not all_lines:
         all_lines.append("- No champions yet.")
@@ -443,7 +443,7 @@ async def leaderboard(interaction: discord.Interaction):
     embed.description = (
         "# 🗓️ Daily Leaderboard \n"
         + "\n ".join(daily_lines)
-        + "\n\n # 🏆 All-Time Leaderboard \n"
+        + "\n\n# 🏆 All-Time Leaderboard \n"
         + "\n ".join(all_lines)
     )
 

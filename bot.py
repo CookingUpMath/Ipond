@@ -140,6 +140,13 @@ async def get_guild_settings(guild_id: int):
 
         return dict(row)
 
+@tree.command(name="forcesync", description="Force sync slash commands.")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def forcesync(interaction: discord.Interaction):
+    await tree.sync(guild=discord.Object(id=GUILD_ID))
+    await interaction.response.send_message("Slash commands synced.")
+
+
 
 # -----------------------------------------
 # BOT READY + SLASH SYNC

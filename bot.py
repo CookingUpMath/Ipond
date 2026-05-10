@@ -425,13 +425,13 @@ async def leaderboard(interaction: discord.Interaction):
         wins = row["wins"]
 
         if i == 1:
-            all_lines.append(f"🥇 {name} — {wins}")
+            all_lines.append(f"🥇 {name} - {wins}")
         elif i == 2:
-            all_lines.append(f"🥈 {name} — {wins}")
+            all_lines.append(f"🥈 {name} - {wins}")
         elif i == 3:
-            all_lines.append(f"🥉 {name} — {wins}")
+            all_lines.append(f"🥉 {name} - {wins}")
         else:
-            all_lines.append(f"▪️ {name} — {wins}")
+            all_lines.append(f"▪️ {name} - {wins}")
 
     if not all_lines:
         all_lines.append("- No champions yet.")
@@ -441,9 +441,9 @@ async def leaderboard(interaction: discord.Interaction):
     # -----------------------------
     embed = discord.Embed(color=discord.Color.gold())
     embed.description = (
-        "# 🗓️ Daily Leaderboard \n"
+        "# 🗓️ Daily Leaderboard "
         + "\n ".join(daily_lines)
-        + "\n\n# 🏆 All-Time Leaderboard \n"
+        + "\n# 🏆 All-Time Leaderboard "
         + "\n ".join(all_lines)
     )
 

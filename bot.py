@@ -368,6 +368,9 @@ async def daily_reset_loop():
             # Reset daily counts
             await reset_daily_counts(guild.id)
 
+# -----------------------------------------
+# Leaderboard
+# -----------------------------------------
 
 @tree.command(name="leaderboard", description="View the daily and all-time leaderboards.")
 async def leaderboard(interaction: discord.Interaction):
@@ -386,7 +389,6 @@ async def leaderboard(interaction: discord.Interaction):
             LIMIT 10
         """, guild_id)
 
-    # Format daily leaderboard
     daily_lines = []
     for i, row in enumerate(daily_rows, start=1):
         user = interaction.guild.get_member(row["user_id"])
@@ -413,7 +415,6 @@ async def leaderboard(interaction: discord.Interaction):
             LIMIT 10
         """, guild_id)
 
-    # Format all-time leaderboard
     all_lines = []
     for i, row in enumerate(all_rows, start=1):
         user = interaction.guild.get_member(row["user_id"])
@@ -431,16 +432,15 @@ async def leaderboard(interaction: discord.Interaction):
     # -----------------------------
     # Build embed
     # -----------------------------
-  embed = discord.Embed(color=discord.Color.gold())
-embed.description = (
-    "# 📅 Daily Leaderboard\n"
-    + "\n".join(daily_lines)
-    + "\n\n# 🏆 All-Time Leaderboard\n"
-    + "\n".join(all_lines)
-)
+    embed = discord.Embed(color=discord.Color.gold())
+    embed.description = (
+        "# 📅 Daily Leaderboard\n"
+        + "\n".join(daily_lines)
+        + "\n\n# 🏆 All-Time Leaderboard\n"
+        + "\n".join(all_lines)
+    )
 
-await interaction.response.send_message(embed=embed)
-
+    await interaction.response.send_message(embed=embed)
 
 
 # -----------------------------------------

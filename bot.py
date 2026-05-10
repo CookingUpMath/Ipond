@@ -35,6 +35,15 @@ intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# ===== Global state for crown commands =====
+cursed_user = None
+cursed_until = None
+mimed_user = None
+mime_until = None
+jester_user = None
+jester_until = None
+crown_uses = {}
+
 # ===== Data helpers =====
 def load_data():
     if os.path.exists(DATA_FILE):
@@ -364,54 +373,6 @@ async def forcereset(interaction: discord.Interaction):
     else:
         await interaction.followup.send("No messages today, no champion crowned.", ephemeral=True)
 
-# ===== Daily reset task =====
-@tasks.loop(minutes=1)
-async def daily_reset():
-    data = load_data()
-    now_utc = datetime.now(ZoneInfo("UTC"))
-
-    for gid, guild_data in data.items():
-        tz = get_guild_tz(guild_data)
-        now_local = now_utc.astimezone(tz)
-        reset_hour = guild_data.get("reset_hour", 0)
-        reset_minute = guild_data.get("reset_minute", 0)
-
-        # Check if it's reset time and we haven't reset today
-        last_reset = guild_data.get("last_reset_date")
-        today_str = now_local.strftime("%Y-%m-%d")
-
-        if (now_local.hour == reset_hour and now_local.minute == reset_minute and
-            last_reset != today_str):
-
-            guild = bot.get_guild(int(gid))
-            if not guild:
-                continue
-
-            champ = await crown_champion(guild, guild_data)
-            guild_data["message_counts"] = {}
-            guild_data["last_reset_date"] = today_str
-            save_data(data)
-
-            # Announce if there was a champ
-            if champ:
-                ch_id = guild_data.get("announce_channel_id")
-                if ch_id:
-                    ch = guild.get_channel(int(ch_id))
-                    if ch:
-                        embed = discord.Embed(color=champ.color)
-                        embed.description = f"-# All hail the top chatter\n# 👑 {champ.mention}"
-                        embed.set_thumbnail(url=champ.display_avatar.url)
-                        await ch.send(embed=embed)
-
-# ===== Entry Point =====
-async def main():
-    await start_webserver()
-    async with bot:
-        await bot.start(TOKEN)
-
-if __name__ == "__main__":
-    asyncio.run(main())
-
 # ===== Crown Commands =====
 @bot.tree.command(name="curse", description="Curse a user until midnight")
 async def curse(interaction: discord.Interaction, user: discord.Member):
@@ -526,3 +487,51 @@ async def jester(interaction: discord.Interaction, user: discord.Member):
 
     save_data(data)
     await interaction.response.send_message(f"🤡 {user.mention} has been jestered.")
+
+# ===== Daily reset task =====
+@tasks.loop(minutes=1)
+async def daily_reset():
+    data = load_data()
+    now_utc = datetime.now(ZoneInfo("UTC"))
+
+    for gid, guild_data in data.items():
+        tz = get_guild_tz(guild_data)
+        now_local = now_utc.astimezone(tz)
+        reset_hour = guild_data.get("reset_hour", 0)
+        reset_minute = guild_data.get("reset_minute", 0)
+
+        # Check if it's reset time and we haven't reset today
+        last_reset = guild_data.get("last_reset_date")
+        today_str = now_local.strftime("%Y-%m-%d")
+
+        if (now_local.hour == reset_hour and now_local.minute == reset_minute and
+            last_reset != today_str):
+
+            guild = bot.get_guild(int(gid))
+            if not guild:
+                continue
+
+            champ = await crown_champion(guild, guild_data)
+            guild_data["message_counts"] = {}
+            guild_data["last_reset_date"] = today_str
+            save_data(data)
+
+            # Announce if there was a champ
+            if champ:
+                ch_id = guild_data.get("announce_channel_id")
+                if ch_id:
+                    ch = guild.get_channel(int(ch_id))
+                    if ch:
+                        embed = discord.Embed(color=champ.color)
+                        embed.description = f"-# All hail the top chatter\n# 👑 {champ.mention}"
+                        embed.set_thumbnail(url=champ.display_avatar.url)
+                        await ch.send(embed=embed)
+
+# ===== Entry Point =====
+async def main():
+    await start_webserver()
+    async with bot:
+        await bot.start(TOKEN)
+
+if __name__ == "__main__":
+    asyncio.run(main())

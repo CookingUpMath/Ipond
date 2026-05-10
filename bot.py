@@ -308,7 +308,7 @@ async def stats(interaction: discord.Interaction, user: discord.Member = None):
         f"# 👑 Crown Stats\n"
         f"🙊 Mimed: `{mimed_count}`\n"
         f"🤡 Jestered: `{jester_count}`\n"
-        f"🔧 Cursed: `{cursed_count}`\n"
+        f"🔮 Cursed: `{cursed_count}`\n"
         f"👑 Crown Uses: `{crown_uses}`"
     )
     embed.set_thumbnail(url=target.display_avatar.url)

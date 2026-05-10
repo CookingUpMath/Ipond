@@ -425,7 +425,7 @@ async def leaderboard(interaction: discord.Interaction):
         wins = row["wins"]
 
         if i == 1:
-            all_lines.append(f"🥇 {name} - {wins}")
+            all_lines.append(f" 🥇 {name} - {wins}")
         elif i == 2:
             all_lines.append(f"🥈 {name} - {wins}")
         elif i == 3:

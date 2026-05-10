@@ -113,6 +113,21 @@ async def on_message(message):
             mimed_user = None
             mime_until = None
 
+        # Handle cursed user quack chance
+    if cursed_user and message.author.id == cursed_user:
+        if datetime.now() < curse_until:
+            import random
+            if random.random() < 0.10:  # 10% chance
+                try:
+                    await message.add_reaction("🦆")
+                except:
+                    pass
+                await message.channel.send("🔮 quack")
+        else:
+            cursed_user = None
+            curse_until = None
+
+
     # Track messages
     data = load_data()
     guild_data = get_guild_data(data, message.guild.id)
@@ -375,7 +390,7 @@ async def leaderboard(interaction: discord.Interaction):
 # ============================
 #  CURSE COMMAND
 # ============================
-@tree.command(name="curse", description="Curse a user - remove champion role for the day")
+@tree.command(name="curse", description="Curse a user - 10% chance the bot quacks at them until midnight")
 async def curse(interaction: discord.Interaction, user: discord.Member):
     global cursed_user, curse_until
 
@@ -383,6 +398,7 @@ async def curse(interaction: discord.Interaction, user: discord.Member):
     guild_data = get_guild_data(data, interaction.guild.id)
     champ_role_id = guild_data.get("champion_role_id")
 
+    # Only champion can use it
     if not champ_role_id or not any(role.id == int(champ_role_id) for role in interaction.user.roles):
         await interaction.response.send_message("❌ Only the current champion can use crown powers.", ephemeral=True)
         return
@@ -391,26 +407,23 @@ async def curse(interaction: discord.Interaction, user: discord.Member):
         await interaction.response.send_message("❌ You can't curse bots.", ephemeral=True)
         return
 
+    # One use per day
     crown_uses = guild_data.setdefault("crown_uses", {}).setdefault(str(interaction.user.id), {})
     if crown_uses.get("curse") == datetime.now().date().isoformat():
         await interaction.response.send_message("❌ You've already used /curse today.", ephemeral=True)
         return
 
+    # Only one cursed user at a time
     if cursed_user and datetime.now() < curse_until:
         await interaction.response.send_message("❌ Someone is already cursed today.", ephemeral=True)
         return
 
-    try:
-        role = interaction.guild.get_role(int(champ_role_id))
-        if role in user.roles:
-            await user.remove_roles(role)
-    except:
-        pass
-
+    # Apply curse
     cursed_user = user.id
     curse_until = datetime.now().replace(hour=23, minute=59, second=59)
     crown_uses["curse"] = datetime.now().date().isoformat()
 
+    # Track stats
     guild_data.setdefault("cursed_victims", {})[str(user.id)] = \
         guild_data.setdefault("cursed_victims", {}).get(str(user.id), 0) + 1
 
@@ -419,7 +432,10 @@ async def curse(interaction: discord.Interaction, user: discord.Member):
 
     save_data(data)
 
-    await interaction.response.send_message(f"🔧 {user.mention} has been cursed and stripped of the crown!")
+    await interaction.response.send_message(
+        f"🔮 {user.mention} has been cursed! They now have a 10% chance of being quacked at until midnight."
+    )
+
 
 # ============================
 #  MIME COMMAND

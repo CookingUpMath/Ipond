@@ -31,7 +31,6 @@ DATABASE_URL = os.getenv(
 
 pool: asyncpg.Pool | None = None
 
-
 async def init_db():
     global pool
     if pool is not None:
@@ -112,14 +111,13 @@ async def init_db():
         );
         """)
 
-# Champion role storage
-await conn.execute("""
-CREATE TABLE IF NOT EXISTS crown_settings (
-    guild_id BIGINT PRIMARY KEY,
-    role_id BIGINT
-);
-""")
-
+        # ⭐ Champion role table (NEW)
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS crown_settings (
+            guild_id BIGINT PRIMARY KEY,
+            role_id BIGINT
+        );
+        """)
 
     print("Database initialized and tables ensured.")
 

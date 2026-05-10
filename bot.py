@@ -373,7 +373,7 @@ async def daily_reset_loop():
                         DO UPDATE SET wins = all_time_wins.wins + 1
                     """, guild.id, winner_id)
 
-                # Update champion
+                # Update champion in guild_settings
                 async with pool.acquire() as conn:
                     await conn.execute("""
                         UPDATE guild_settings
@@ -392,21 +392,10 @@ async def daily_reset_loop():
                         except:
                             pass
 
-# Update nickname with crown if champion VC is set
-if settings["champion_vc_id"]:
-    member = guild.get_member(winner_id)
-    if member:
-        try:
-            if "👑" not in member.display_name:
-                await member.edit(nick=f"{member.display_name} 👑")
-        except:
-            pass
-
-# ⭐ Apply champion role if set
-winner_member = guild.get_member(winner_id)
-if winner_member:
-    await apply_champion_role(guild, winner_member)
-
+                # ⭐ Apply champion role if set
+                winner_member = guild.get_member(winner_id)
+                if winner_member:
+                    await apply_champion_role(guild, winner_member)
 
                 # Announce winner
                 if settings["announce_channel_id"]:
@@ -425,6 +414,7 @@ if winner_member:
 
             # Reset daily counts
             await reset_daily_counts(guild.id)
+
 
 # -----------------------------------------
 # Leaderboard

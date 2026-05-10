@@ -16,7 +16,7 @@ intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-GUILD_ID = YOUR_GUILD_ID_HERE  # <-- Replace with your server ID
+GUILD_ID = 1055252003367960646  # <-- Replace with your server ID
 
 # Slash command tree
 tree = bot.tree

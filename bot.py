@@ -124,8 +124,8 @@ async def crown_champion(guild, guild_data):
             new_vc = await guild.create_voice_channel(f"👑: {member.display_name}", overwrites=overwrites)
             guild_data["champion_vc_id"] = str(new_vc.id)
 
-    # Bot status
-    await bot.change_presence(activity=discord.Game(name=f"👑 {member.display_name}"))
+    # Bot status - FIXED: was using undefined 'winner'
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=f"👑 {member.display_name}"))
 
     return member
 
@@ -223,7 +223,6 @@ async def overall(interaction: discord.Interaction):
 
     sorted_wins = sorted(wins.items(), key=lambda x: x[1], reverse=True)
 
-    # Pagination logic - 20 per page
     pages = [sorted_wins[i:i+20] for i in range(0, len(sorted_wins), 20)]
     page = 0
 
@@ -265,35 +264,15 @@ async def overall(interaction: discord.Interaction):
         except asyncio.TimeoutError:
             break
 
-@bot.tree.command(name="stats", description="Show your Top Duck wins and crown stats")
-async def stats(interaction: discord.Interaction, user: discord.Member = None):
-    target = user or interaction.user
+@bot.tree.command(name="stats", description="Show your Top Duck wins")
+async def stats(interaction: discord.Interaction):
     data = load_data()
     guild_data = get_guild_data(data, interaction.guild.id)
-    
-    uid = str(target.id)
-    wins = guild_data.get("overall_wins", {}).get(uid, 0)  # Note: you may want to sync this key later
-    crown_uses = guild_data.get("crown_uses_count", {}).get(uid, 0)
-    cursed_count = guild_data.get("cursed_victims", {}).get(uid, 0)
-    mimed_count = guild_data.get("mimed_victims", {}).get(uid, 0)
-    jester_count = guild_data.get("jester_victims", {}).get(uid, 0)
-    
-    # Note: get_today_key is not defined in the provided code - you'll need to add it if used
-    # today = get_today_key(guild_data.get("timezone", "UTC"))
-    # messages_today = guild_data.get("daily_counts", {}).get(today, {}).get(uid, 0)
-    messages_today = guild_data["message_counts"].get(uid, 0)  # fallback for now
-    
-    embed = discord.Embed(
-        title=f"📊 Stats for {target.display_name}",
-        color=0x3498DB
-    )
-    embed.add_field(name="🏆 Top Duck Wins", value=f"`{wins}`", inline=True)
-    embed.add_field(name="💬 Messages Today", value=f"`{messages_today}`", inline=True)
-    embed.add_field(name="‎", value="‎", inline=True)
-    
-    crown_stats = f"👑: `{crown_uses}`  🤡: `{jester_count}`\n🔮: `{cursed_count}`  🙊: `{mimed_count}`"
-    embed.add_field(name="Crown Stats", value=crown_stats, inline=False)
-    
+    wins = guild_data["all_time_wins"].get(str(interaction.user.id), 0)
+
+    embed = discord.Embed(color=interaction.user.color)
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
+    embed.add_field(name=interaction.user.display_name, value=f"**{wins}** total wins")
     await interaction.response.send_message(embed=embed)
 
 # Admin commands

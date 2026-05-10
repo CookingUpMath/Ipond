@@ -16,7 +16,7 @@ intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-GUILD_ID = 1055252003367960646  # <-- Replace with your server ID
+GUILD_ID = 1055252003367960646  # Your server ID (no longer used for scoping, just kept here)
 
 # Slash command tree
 tree = bot.tree
@@ -30,87 +30,88 @@ DATABASE_URL = os.getenv(
     "postgresql://postgres:xdbadtLrYdLWvRUjgnyyjsIGBnjWeyRf@postgres.railway.internal:5432/railway"
 )
 
-
 pool: asyncpg.Pool | None = None
+
 
 async def init_db():
     global pool
-    pool = await asyncpg.create_pool(DATABASE_URL)
+    if pool is None:
+        pool = await asyncpg.create_pool(DATABASE_URL)
 
-    async with pool.acquire() as conn:
+        async with pool.acquire() as conn:
 
-        # Guild settings
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS guild_settings (
-            guild_id BIGINT PRIMARY KEY,
-            announce_channel_id BIGINT,
-            champion_vc_id BIGINT,
-            timezone_str TEXT DEFAULT 'EST',
-            reset_hour INT DEFAULT 0,
-            reset_minute INT DEFAULT 0,
-            current_champion_id BIGINT,
-            last_reset_date DATE
-        );
-        """)
+            # Guild settings
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS guild_settings (
+                guild_id BIGINT PRIMARY KEY,
+                announce_channel_id BIGINT,
+                champion_vc_id BIGINT,
+                timezone_str TEXT DEFAULT 'EST',
+                reset_hour INT DEFAULT 0,
+                reset_minute INT DEFAULT 0,
+                current_champion_id BIGINT,
+                last_reset_date DATE
+            );
+            """)
 
-        # Daily message counts
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS message_counts (
-            guild_id BIGINT,
-            user_id BIGINT,
-            count BIGINT DEFAULT 0,
-            PRIMARY KEY (guild_id, user_id)
-        );
-        """)
+            # Daily message counts
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS message_counts (
+                guild_id BIGINT,
+                user_id BIGINT,
+                count BIGINT DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id)
+            );
+            """)
 
-        # All-time wins
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS all_time_wins (
-            guild_id BIGINT,
-            user_id BIGINT,
-            wins BIGINT DEFAULT 0,
-            PRIMARY KEY (guild_id, user_id)
-        );
-        """)
+            # All-time wins
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS all_time_wins (
+                guild_id BIGINT,
+                user_id BIGINT,
+                wins BIGINT DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id)
+            );
+            """)
 
-        # Crown uses
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS crown_uses (
-            guild_id BIGINT,
-            user_id BIGINT,
-            curse_used BIGINT DEFAULT 0,
-            mime_used BIGINT DEFAULT 0,
-            jester_used BIGINT DEFAULT 0,
-            PRIMARY KEY (guild_id, user_id)
-        );
-        """)
+            # Crown uses
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS crown_uses (
+                guild_id BIGINT,
+                user_id BIGINT,
+                curse_used BIGINT DEFAULT 0,
+                mime_used BIGINT DEFAULT 0,
+                jester_used BIGINT DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id)
+            );
+            """)
 
-        # Victim stats
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS victim_stats (
-            guild_id BIGINT,
-            user_id BIGINT,
-            cursed BIGINT DEFAULT 0,
-            mimed BIGINT DEFAULT 0,
-            jestered BIGINT DEFAULT 0,
-            PRIMARY KEY (guild_id, user_id)
-        );
-        """)
+            # Victim stats
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS victim_stats (
+                guild_id BIGINT,
+                user_id BIGINT,
+                cursed BIGINT DEFAULT 0,
+                mimed BIGINT DEFAULT 0,
+                jestered BIGINT DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id)
+            );
+            """)
 
-        # Active effects
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS active_effects (
-            guild_id BIGINT PRIMARY KEY,
-            cursed_user BIGINT,
-            curse_until TIMESTAMP,
-            mimed_user BIGINT,
-            mime_until TIMESTAMP,
-            jester_user BIGINT,
-            jester_until TIMESTAMP
-        );
-        """)
+            # Active effects
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS active_effects (
+                guild_id BIGINT PRIMARY KEY,
+                cursed_user BIGINT,
+                curse_until TIMESTAMP,
+                mimed_user BIGINT,
+                mime_until TIMESTAMP,
+                jester_user BIGINT,
+                jester_until TIMESTAMP
+            );
+            """)
 
-    print("Database initialized and tables ensured.")
+        print("Database initialized and tables ensured.")
 
 
 # -----------------------------------------
@@ -140,12 +141,15 @@ async def get_guild_settings(guild_id: int):
 
         return dict(row)
 
-@tree.command(name="forcesync", description="Force sync slash commands.")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
-async def forcesync(interaction: discord.Interaction):
-    await tree.sync(guild=discord.Object(id=GUILD_ID))
-    await interaction.response.send_message("Slash commands synced.")
 
+# -----------------------------------------
+# /forcesync — GLOBAL SYNC
+# -----------------------------------------
+
+@tree.command(name="forcesync", description="Force sync slash commands.")
+async def forcesync(interaction: discord.Interaction):
+    await tree.sync()
+    await interaction.response.send_message("Slash commands synced.")
 
 
 # -----------------------------------------
@@ -156,11 +160,15 @@ async def forcesync(interaction: discord.Interaction):
 async def on_ready():
     await init_db()
 
-    # Sync slash commands to your guild only
-    guild = discord.Object(id=GUILD_ID)
-    await tree.sync(guild=guild)
+    # Global slash command sync
+    await tree.sync()
+
+    # Start daily reset loop if not running
+    if not daily_reset_loop.is_running():
+        daily_reset_loop.start()
 
     print(f"Bot is online as {bot.user}")
+
 
 # -----------------------------------------
 # PART 2 — MESSAGE COUNTING + EFFECTS + RESET
@@ -223,24 +231,70 @@ async def on_message(message: discord.Message):
             SELECT * FROM active_effects WHERE guild_id = $1
         """, guild.id)
 
-    if effect:
+    now_utc = datetime.utcnow()
 
-        # CURSED — 30% chance to annoy
-        if effect["cursed_user"] == message.author.id:
+    if effect:
+        # Handle expiry and clear expired effects
+        cursed_user = effect["cursed_user"]
+        curse_until = effect["curse_until"]
+        mimed_user = effect["mimed_user"]
+        mime_until = effect["mime_until"]
+        jester_user = effect["jester_user"]
+        jester_until = effect["jester_until"]
+
+        update_needed = False
+        new_cursed_user, new_curse_until = cursed_user, curse_until
+        new_mimed_user, new_mime_until = mimed_user, mime_until
+        new_jester_user, new_jester_until = jester_user, jester_until
+
+        if curse_until and curse_until < now_utc:
+            new_cursed_user, new_curse_until = None, None
+            update_needed = True
+
+        if mime_until and mime_until < now_utc:
+            new_mimed_user, new_mime_until = None, None
+            update_needed = True
+
+        if jester_until and jester_until < now_utc:
+            new_jester_user, new_jester_until = None, None
+            update_needed = True
+
+        if update_needed:
+            async with pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE active_effects
+                    SET cursed_user = $2,
+                        curse_until = $3,
+                        mimed_user = $4,
+                        mime_until = $5,
+                        jester_user = $6,
+                        jester_until = $7
+                    WHERE guild_id = $1
+                """, guild.id,
+                   new_cursed_user, new_curse_until,
+                   new_mimed_user, new_mime_until,
+                   new_jester_user, new_jester_until)
+
+            cursed_user, curse_until = new_cursed_user, new_curse_until
+            mimed_user, mime_until = new_mimed_user, new_mime_until
+            jester_user, jester_until = new_jester_user, new_jester_until
+
+        # CURSED — 30% chance to annoy (only if not expired)
+        if cursed_user == message.author.id and curse_until and curse_until >= now_utc:
             if random.random() < 0.30:
                 await message.add_reaction("🦆")
                 await message.channel.send("quack")
 
-        # MIMED — delete message
-        if effect["mimed_user"] == message.author.id:
+        # MIMED — delete message (only if not expired)
+        if mimed_user == message.author.id and mime_until and mime_until >= now_utc:
             try:
                 await message.delete()
             except:
                 pass
             return
 
-        # JESTER — add 🤡 to nickname
-        if effect["jester_user"] == message.author.id:
+        # JESTER — add 🤡 to nickname (only if not expired)
+        if jester_user == message.author.id and jester_until and jester_until >= now_utc:
             try:
                 if "🤡" not in message.author.display_name:
                     await message.author.edit(nick=f"{message.author.display_name} 🤡")
@@ -319,19 +373,6 @@ async def daily_reset_loop():
             await reset_daily_counts(guild.id)
 
 
-# Start loop when bot is ready
-@bot.event
-async def on_ready():
-    await init_db()
-
-    guild = discord.Object(id=GUILD_ID)
-    await tree.sync(guild=guild)
-
-    if not daily_reset_loop.is_running():
-        daily_reset_loop.start()
-
-    print(f"Bot is online as {bot.user}")
-
 # -----------------------------------------
 # PART 3 — CROWN POWERS (SLASH COMMANDS)
 # -----------------------------------------
@@ -402,11 +443,10 @@ async def increment_victim_stat(guild_id: int, user_id: int, effect: str):
 
 
 # -----------------------------------------
-# /curse
+# /curse — UNTIL DAILY RESET
 # -----------------------------------------
 
-@tree.command(name="curse", description="Curse a user for 24 hours.")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
+@tree.command(name="curse", description="Curse a user until the daily reset.")
 async def curse(interaction: discord.Interaction, member: discord.Member):
 
     guild_id = interaction.guild_id
@@ -416,15 +456,26 @@ async def curse(interaction: discord.Interaction, member: discord.Member):
     await increment_crown_use(guild_id, user_id, "curse")
     await increment_victim_stat(guild_id, member.id, "curse")
 
-    # Apply effect
-    until = datetime.utcnow() + timedelta(hours=24)
-    await set_active_effect(guild_id, "curse", member.id, until)
+    # Curse lasts until reset
+    settings = await get_guild_settings(guild_id)
+    tz = get_tz(settings)
+    now = datetime.now(tz)
+    reset_time = now.replace(
+        hour=settings["reset_hour"],
+        minute=settings["reset_minute"],
+        second=0,
+        microsecond=0
+    )
+    if reset_time <= now:
+        reset_time += timedelta(days=1)
 
-    # Embed
+    until_utc = reset_time.astimezone(pytz.utc).replace(tzinfo=None)
+    await set_active_effect(guild_id, "curse", member.id, until_utc)
+
     embed = discord.Embed(color=discord.Color.red())
     embed.description = (
         "# 🦆 Curse Applied\n"
-        "-# Duration: 24 hours\n"
+        "-# Duration: Until daily reset\n"
         "-# Effect: 30% chance to annoy with quacks\n\n"
         f"**{member.mention}** has been **cursed**."
     )
@@ -433,11 +484,10 @@ async def curse(interaction: discord.Interaction, member: discord.Member):
 
 
 # -----------------------------------------
-# /mime
+# /mime — 30 MINUTES
 # -----------------------------------------
 
-@tree.command(name="mime", description="Silence a user for 24 hours.")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
+@tree.command(name="mime", description="Silence a user for 30 minutes.")
 async def mime(interaction: discord.Interaction, member: discord.Member):
 
     guild_id = interaction.guild_id
@@ -446,13 +496,13 @@ async def mime(interaction: discord.Interaction, member: discord.Member):
     await increment_crown_use(guild_id, user_id, "mime")
     await increment_victim_stat(guild_id, member.id, "mime")
 
-    until = datetime.utcnow() + timedelta(hours=24)
+    until = datetime.utcnow() + timedelta(minutes=30)
     await set_active_effect(guild_id, "mime", member.id, until)
 
     embed = discord.Embed(color=discord.Color.dark_gray())
     embed.description = (
         "# 🤐 Mime Applied\n"
-        "-# Duration: 24 hours\n"
+        "-# Duration: 30 minutes\n"
         "-# Effect: Deletes all messages they send\n\n"
         f"**{member.mention}** has been **mimed**."
     )
@@ -461,11 +511,10 @@ async def mime(interaction: discord.Interaction, member: discord.Member):
 
 
 # -----------------------------------------
-# /jester
+# /jester — UNTIL DAILY RESET
 # -----------------------------------------
 
-@tree.command(name="jester", description="Turn a user into a jester for 24 hours.")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
+@tree.command(name="jester", description="Turn a user into a jester until the daily reset.")
 async def jester(interaction: discord.Interaction, member: discord.Member):
 
     guild_id = interaction.guild_id
@@ -474,18 +523,32 @@ async def jester(interaction: discord.Interaction, member: discord.Member):
     await increment_crown_use(guild_id, user_id, "jester")
     await increment_victim_stat(guild_id, member.id, "jester")
 
-    until = datetime.utcnow() + timedelta(hours=24)
-    await set_active_effect(guild_id, "jester", member.id, until)
+    # Jester lasts until reset
+    settings = await get_guild_settings(guild_id)
+    tz = get_tz(settings)
+    now = datetime.now(tz)
+    reset_time = now.replace(
+        hour=settings["reset_hour"],
+        minute=settings["reset_minute"],
+        second=0,
+        microsecond=0
+    )
+    if reset_time <= now:
+        reset_time += timedelta(days=1)
+
+    until_utc = reset_time.astimezone(pytz.utc).replace(tzinfo=None)
+    await set_active_effect(guild_id, "jester", member.id, until_utc)
 
     embed = discord.Embed(color=discord.Color.purple())
     embed.description = (
         "# 🤡 Jester Applied\n"
-        "-# Duration: 24 hours\n"
+        "-# Duration: Until daily reset\n"
         "-# Effect: Adds 🤡 to their nickname\n\n"
         f"**{member.mention}** has been **jestered**."
     )
 
     await interaction.response.send_message(embed=embed)
+
 
 # -----------------------------------------
 # PART 4 — ADMIN SETTINGS (SLASH COMMANDS)
@@ -502,7 +565,6 @@ def admin_only():
 # -----------------------------------------
 
 @tree.command(name="setannounce", description="Set the channel where champion announcements are posted.")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
 @admin_only()
 async def setannounce(interaction: discord.Interaction, channel: discord.TextChannel):
 
@@ -527,7 +589,6 @@ async def setannounce(interaction: discord.Interaction, channel: discord.TextCha
 # -----------------------------------------
 
 @tree.command(name="setchampionvc", description="Set the VC used for champion nickname styling.")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
 @admin_only()
 async def setchampionvc(interaction: discord.Interaction, channel: discord.VoiceChannel):
 
@@ -553,7 +614,6 @@ async def setchampionvc(interaction: discord.Interaction, channel: discord.Voice
 # -----------------------------------------
 
 @tree.command(name="settimezone", description="Set the server's timezone.")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
 @admin_only()
 async def settimezone(interaction: discord.Interaction, timezone: str):
 
@@ -584,7 +644,6 @@ async def settimezone(interaction: discord.Interaction, timezone: str):
 # -----------------------------------------
 
 @tree.command(name="setreset", description="Set the daily reset time (24h format).")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
 @admin_only()
 async def setreset(interaction: discord.Interaction, hour: int, minute: int):
 
@@ -614,7 +673,6 @@ async def setreset(interaction: discord.Interaction, hour: int, minute: int):
 # -----------------------------------------
 
 @tree.command(name="settings", description="View all server settings.")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
 async def settings_cmd(interaction: discord.Interaction):
 
     settings = await get_guild_settings(interaction.guild_id)
@@ -633,25 +691,6 @@ async def settings_cmd(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed)
 
-# -----------------------------------------
-# PART 5 — FINAL STARTUP + SYNC + SHUTDOWN
-# -----------------------------------------
-
-@bot.event
-async def on_ready():
-    # Initialize DB
-    await init_db()
-
-    # Sync slash commands to your guild only
-    guild = discord.Object(id=GUILD_ID)
-    await tree.sync(guild=guild)
-
-    # Start daily reset loop if not running
-    if not daily_reset_loop.is_running():
-        daily_reset_loop.start()
-
-    print(f"Bot is online as {bot.user}")
-
 
 # -----------------------------------------
 # GRACEFUL SHUTDOWN
@@ -661,6 +700,7 @@ async def close_db():
     global pool
     if pool:
         await pool.close()
+        pool = None
 
 
 @bot.event

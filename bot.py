@@ -369,6 +369,80 @@ async def daily_reset_loop():
             await reset_daily_counts(guild.id)
 
 
+@tree.command(name="leaderboard", description="View the daily and all-time leaderboards.")
+async def leaderboard(interaction: discord.Interaction):
+
+    guild_id = interaction.guild_id
+
+    # -----------------------------
+    # Fetch DAILY leaderboard
+    # -----------------------------
+    async with pool.acquire() as conn:
+        daily_rows = await conn.fetch("""
+            SELECT user_id, count
+            FROM message_counts
+            WHERE guild_id = $1
+            ORDER BY count DESC
+            LIMIT 10
+        """, guild_id)
+
+    # Format daily leaderboard
+    daily_lines = []
+    for i, row in enumerate(daily_rows, start=1):
+        user = interaction.guild.get_member(row["user_id"])
+        name = user.display_name if user else f"User {row['user_id']}"
+        count = row["count"]
+
+        if i <= 3:
+            daily_lines.append(f"**{i}. {name} — {count}**")
+        else:
+            daily_lines.append(f"-# {i}. {name} — {count}")
+
+    if not daily_lines:
+        daily_lines.append("-# No messages today.")
+
+    # -----------------------------
+    # Fetch ALL-TIME leaderboard
+    # -----------------------------
+    async with pool.acquire() as conn:
+        all_rows = await conn.fetch("""
+            SELECT user_id, wins
+            FROM all_time_wins
+            WHERE guild_id = $1
+            ORDER BY wins DESC
+            LIMIT 10
+        """, guild_id)
+
+    # Format all-time leaderboard
+    all_lines = []
+    for i, row in enumerate(all_rows, start=1):
+        user = interaction.guild.get_member(row["user_id"])
+        name = user.display_name if user else f"User {row['user_id']}"
+        wins = row["wins"]
+
+        if i <= 3:
+            all_lines.append(f"**{i}. {name} — {wins}**")
+        else:
+            all_lines.append(f"-# {i}. {name} — {wins}")
+
+    if not all_lines:
+        all_lines.append("-# No champions yet.")
+
+    # -----------------------------
+    # Build embed
+    # -----------------------------
+    embed = discord.Embed(color=discord.Color.gold())
+    embed.description = (
+        "# 📅 Daily Leaderboard\n"
+        + "\n".join(daily_lines)
+        + "\n\n"
+        "# 🏆 All-Time Leaderboard\n"
+        + "\n".join(all_lines)
+    )
+
+    await interaction.response.send_message(embed=embed)
+
+
 # -----------------------------------------
 # PART 3 — CROWN POWERS (SLASH COMMANDS)
 # -----------------------------------------

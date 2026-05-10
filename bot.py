@@ -395,13 +395,13 @@ async def leaderboard(interaction: discord.Interaction):
         count = row["count"]
 
         if i == 1:
-            daily_lines.append(f"**🥇 {name} — {count}**")
+            daily_lines.append(f" ## 🥇 {name} — {count}")
         elif i == 2:
             daily_lines.append(f"🥈 {name} — {count}")
         elif i == 3:
             daily_lines.append(f"🥉 {name} — {count}")
         else:
-            daily_lines.append(f"-# ▪️ {name} — {count}")
+            daily_lines.append(f" -# ▪️ {name} — {count}")
 
     if not daily_lines:
         daily_lines.append("- No messages today.")

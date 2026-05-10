@@ -112,6 +112,15 @@ async def init_db():
         );
         """)
 
+# Champion role storage
+await conn.execute("""
+CREATE TABLE IF NOT EXISTS crown_settings (
+    guild_id BIGINT PRIMARY KEY,
+    role_id BIGINT
+);
+""")
+
+
     print("Database initialized and tables ensured.")
 
 
@@ -299,6 +308,39 @@ async def on_message(message: discord.Message):
 
     await bot.process_commands(message)
 
+# -----------------------------------------
+# Champion Role Helper
+# -----------------------------------------
+
+async def apply_champion_role(guild: discord.Guild, new_champion: discord.Member):
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT role_id FROM crown_settings WHERE guild_id = $1",
+            guild.id
+        )
+
+    if not row or not row["role_id"]:
+        return  # No champion role set
+
+    role = guild.get_role(row["role_id"])
+    if not role:
+        return
+
+    # Remove role from previous champion(s)
+    for member in role.members:
+        if member != new_champion:
+            try:
+                await member.remove_roles(role, reason="New champion crowned")
+            except:
+                pass
+
+    # Add role to new champion
+    if new_champion and role not in new_champion.roles:
+        try:
+            await new_champion.add_roles(role, reason="Champion crowned")
+        except:
+            pass
+
 
 # -----------------------------------------
 # DAILY RESET LOOP
@@ -349,6 +391,22 @@ async def daily_reset_loop():
                                 await member.edit(nick=f"{member.display_name} 👑")
                         except:
                             pass
+
+# Update nickname with crown if champion VC is set
+if settings["champion_vc_id"]:
+    member = guild.get_member(winner_id)
+    if member:
+        try:
+            if "👑" not in member.display_name:
+                await member.edit(nick=f"{member.display_name} 👑")
+        except:
+            pass
+
+# ⭐ Apply champion role if set
+winner_member = guild.get_member(winner_id)
+if winner_member:
+    await apply_champion_role(guild, winner_member)
+
 
                 # Announce winner
                 if settings["announce_channel_id"]:
@@ -635,6 +693,32 @@ def admin_only():
     async def predicate(interaction: discord.Interaction):
         return interaction.user.guild_permissions.administrator
     return app_commands.check(predicate)
+
+# -----------------------------------------
+# /setrole — Set the champion role
+# -----------------------------------------
+
+@tree.command(name="setrole", description="Set the champion role for this server.")
+@admin_only()
+@app_commands.describe(role="The role that will be assigned to the daily champion.")
+async def setrole(interaction: discord.Interaction, role: discord.Role):
+
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO crown_settings (guild_id, role_id)
+            VALUES ($1, $2)
+            ON CONFLICT (guild_id)
+            DO UPDATE SET role_id = EXCLUDED.role_id
+        """, interaction.guild_id, role.id)
+
+    embed = discord.Embed(color=discord.Color.gold())
+    embed.description = (
+        "# 👑 Champion Role Updated\n"
+        f"-# New Role: {role.mention}"
+    )
+
+    await interaction.response.send_message(embed=embed)
+
 
 
 # -----------------------------------------

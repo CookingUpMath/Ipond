@@ -431,14 +431,14 @@ async def leaderboard(interaction: discord.Interaction):
     # -----------------------------
     # Build embed
     # -----------------------------
-    embed = discord.Embed(color=discord.Color.gold())
-    embed.description = (
-        "# 📅 Daily Leaderboard\n"
-        + "\n".join(daily_lines)
-        + "\n\n"
-        "# 🏆 All-Time Leaderboard\n"
-        + "\n".join(all_lines)
-    )
+   embed = discord.Embed(color=discord.Color.gold())
+embed.description = (
+    "# 📅 Daily Leaderboard\n"
+    + "\n".join(daily_lines)
+    + "\n\n# 🏆 All-Time Leaderboard\n"
+    + "\n".join(all_lines)
+)
+
 
     await interaction.response.send_message(embed=embed)
 
@@ -822,7 +822,11 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
         f"-# 🔮 Cursed: **{curse_used}**"
     )
 
+    # ⭐ Add profile picture
+    embed.set_thumbnail(url=target.display_avatar.url)
+
     await interaction.response.send_message(embed=embed)
+
 
 
 # -----------------------------------------

@@ -1,0 +1,19 @@
+{
+  "1055252003367960646": {
+    "message_counts": {
+      "487417720657281026": 5
+    },
+    "current_champion_id": "487417720657281026",
+    "champion_role_id": "1502819240095383674",
+    "champion_vc_id": "1502818142257283214",
+    "last_reset_date": "2026-05-10",
+    "all_time_wins": {
+      "487417720657281026": 2,
+      "1145722923198468190": 1
+    },
+    "announce_channel_id": "1406411669785280593",
+    "timezone_str": "EST",
+    "reset_hour": 0,
+    "reset_minute": 0
+  }
+}

@@ -27,8 +27,9 @@ tree = bot.tree
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://postgres:pLfujvTHBmCInONYmotvXXhBYqqsfljB@postgres.railway.internal:5432/railway"
+    "postgresql://postgres:xdbadtLrYdLWvRUjgnyyjsIGBnjWeyRf@postgres.railway.internal:5432/railway"
 )
+
 
 pool: asyncpg.Pool | None = None
 

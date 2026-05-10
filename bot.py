@@ -441,9 +441,9 @@ async def leaderboard(interaction: discord.Interaction):
     # -----------------------------
     embed = discord.Embed(color=discord.Color.gold())
     embed.description = (
-        "# 🗓️ Daily Leaderboard "
+        "# 🗓️ Daily Leaderboard \n"
         + "\n ".join(daily_lines)
-        + "\n# 🏆 All-Time Leaderboard "
+        + "\n# 🏆 All-Time Leaderboard \n"
         + "\n ".join(all_lines)
     )
 

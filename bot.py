@@ -126,7 +126,7 @@ async def crown_champion(guild, guild_data):
             guild_data["champion_vc_id"] = str(new_vc.id)
 
     # Bot status
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=f"ðŸ‘‘ {winner.display_name}"))
+    await bot.change_presence(activity=discord.Game(name=f"ðŸ‘‘ {member.display_name}"))
 
     return member
 
@@ -145,8 +145,50 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
+    global mimed_user, mime_until
+    
+    # Skip bot messages and DMs
     if message.author.bot or not message.guild:
         return
+    
+    # Check if user is mimed
+    if mimed_user and message.author.id == mimed_user:
+        if datetime.now() < mime_until:
+            is_allowed = False
+            
+            # Check for stickers
+            if message.stickers:
+                is_allowed = True
+            # Check for GIFs/images
+            elif message.attachments:
+                for att in message.attachments:
+                    if any(att.filename.lower().endswith(ext) for ext in ['.gif', '.png', '.jpg', '.jpeg', '.webp']):
+                        is_allowed = True
+                        break
+            # Check for tenor/giphy links
+            elif any(x in message.content for x in ['tenor.com', 'giphy.com', 'cdn.discordapp.com']):
+                is_allowed = True
+            # Check if content is only emojis
+            else:
+                import re
+                content_no_emoji = re.sub(r'<a?:\w+:\d+>', '', message.content)
+                content_no_emoji = re.sub(r'[\U0001F000-\U0001FFFF]', '', content_no_emoji)
+                content_no_emoji = content_no_emoji.strip()
+                if not content_no_emoji and message.content.strip():
+                    is_allowed = True
+            
+            if not is_allowed:
+                try:
+                    await message.delete()
+                    await message.channel.send(f"{message.author.mention} ðŸ™Š Mimed users can only send emojis, stickers, or GIFs!", delete_after=5)
+                except:
+                    pass
+                return
+        else:
+            mimed_user = None
+            mime_until = None
+    
+    # Track message counts for Top Duck
     data = load_data()
     guild_data = get_guild_data(data, message.guild.id)
     uid = str(message.author.id)
@@ -411,3 +453,118 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# ===== Crown Commands =====
+@bot.tree.command(name="curse", description="Curse a user until midnight")
+async def curse(interaction: discord.Interaction, user: discord.Member):
+    global cursed_user, cursed_until, crown_uses
+    
+    data = load_data()
+    guild_data = get_guild_data(data, interaction.guild.id)
+    champ_role_id = guild_data.get("champion_role_id")
+    
+    if not champ_role_id or not any(str(r.id) == champ_role_id for r in interaction.user.roles):
+        return await interaction.response.send_message("Only the crown can use this.", ephemeral=True)
+    
+    if user.bot: 
+        return await interaction.response.send_message("Can't curse bots.", ephemeral=True)
+    if crown_uses.get("curse") == datetime.now().date():
+        return await interaction.response.send_message("Already used /curse today.", ephemeral=True)
+    if cursed_user and datetime.now() < cursed_until:
+        return await interaction.response.send_message("Someone's already cursed.", ephemeral=True)
+    
+    cursed_user = user.id
+    cursed_until = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    crown_uses["curse"] = datetime.now().date()
+    
+    # Track stats
+    victim_id = str(user.id)
+    king_id = str(interaction.user.id)
+    
+    if "cursed_victims" not in guild_data:
+        guild_data["cursed_victims"] = {}
+    guild_data["cursed_victims"][victim_id] = guild_data["cursed_victims"].get(victim_id, 0) + 1
+    
+    if "crown_uses_count" not in guild_data:
+        guild_data["crown_uses_count"] = {}
+    guild_data["crown_uses_count"][king_id] = guild_data["crown_uses_count"].get(king_id, 0) + 1
+    
+    save_data(data)
+    await interaction.response.send_message(f"ðŸ”® {user.mention} has been cursed.")
+
+@bot.tree.command(name="mime", description="Make a user a mime for 10 minutes")
+async def mime(interaction: discord.Interaction, user: discord.Member):
+    global mimed_user, mime_until, crown_uses
+    
+    data = load_data()
+    guild_data = get_guild_data(data, interaction.guild.id)
+    champ_role_id = guild_data.get("champion_role_id")
+    
+    if not champ_role_id or not any(str(r.id) == champ_role_id for r in interaction.user.roles):
+        return await interaction.response.send_message("Only the crown can use this.", ephemeral=True)
+    
+    if user.bot: 
+        return await interaction.response.send_message("Can't mime bots.", ephemeral=True)
+    if crown_uses.get("mime") == datetime.now().date():
+        return await interaction.response.send_message("Already used /mime today.", ephemeral=True)
+    
+    mimed_user = user.id
+    mime_until = datetime.now() + timedelta(minutes=10)
+    crown_uses["mime"] = datetime.now().date()
+    
+    # Track stats
+    victim_id = str(user.id)
+    king_id = str(interaction.user.id)
+    
+    if "mimed_victims" not in guild_data:
+        guild_data["mimed_victims"] = {}
+    guild_data["mimed_victims"][victim_id] = guild_data["mimed_victims"].get(victim_id, 0) + 1
+    
+    if "crown_uses_count" not in guild_data:
+        guild_data["crown_uses_count"] = {}
+    guild_data["crown_uses_count"][king_id] = guild_data["crown_uses_count"].get(king_id, 0) + 1
+    
+    save_data(data)
+    await interaction.response.send_message(f"ðŸ™Š {user.mention} has been mimed.")
+
+@bot.tree.command(name="jester", description="Make a user the jester until midnight")
+async def jester(interaction: discord.Interaction, user: discord.Member):
+    global jester_user, jester_until, crown_uses
+    
+    data = load_data()
+    guild_data = get_guild_data(data, interaction.guild.id)
+    champ_role_id = guild_data.get("champion_role_id")
+    
+    if not champ_role_id or not any(str(r.id) == champ_role_id for r in interaction.user.roles):
+        return await interaction.response.send_message("Only the crown can use this.", ephemeral=True)
+    
+    if user.bot: 
+        return await interaction.response.send_message("Can't jester bots.", ephemeral=True)
+    if crown_uses.get("jester") == datetime.now().date():
+        return await interaction.response.send_message("Already used /jester today.", ephemeral=True)
+    if jester_user and datetime.now() < jester_until:
+        return await interaction.response.send_message("Only one jester allowed.", ephemeral=True)
+    
+    try: 
+        await user.edit(nick=f"ðŸ¤¡ {user.display_name}"[:32])
+    except: 
+        return await interaction.response.send_message("Can't edit that user's nickname.", ephemeral=True)
+    
+    jester_user = user.id
+    jester_until = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    crown_uses["jester"] = datetime.now().date()
+    
+    # Track stats
+    victim_id = str(user.id)
+    king_id = str(interaction.user.id)
+    
+    if "jester_victims" not in guild_data:
+        guild_data["jester_victims"] = {}
+    guild_data["jester_victims"][victim_id] = guild_data["jester_victims"].get(victim_id, 0) + 1
+    
+    if "crown_uses_count" not in guild_data:
+        guild_data["crown_uses_count"] = {}
+    guild_data["crown_uses_count"][king_id] = guild_data["crown_uses_count"].get(king_id, 0) + 1
+    
+    save_data(data)
+    await interaction.response.send_message(f"ðŸ¤¡ {user.mention} has been jestered.")

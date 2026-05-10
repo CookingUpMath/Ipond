@@ -159,12 +159,6 @@ async def forcesync(interaction: discord.Interaction):
     await tree.sync()
     await interaction.response.send_message("Slash commands synced.")
 
-@tree.command(name="flushguild", description="Flush old guild commands.")
-async def flushguild(interaction: discord.Interaction):
-    await tree.sync(guild=interaction.guild)
-    await interaction.response.send_message("Guild commands flushed.")
-
-
 
 # -----------------------------------------
 # BOT READY + SLASH SYNC

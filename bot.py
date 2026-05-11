@@ -930,7 +930,7 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
         """, guild_id, target.id)
     wins = row["wins"] if row else 0
 
-    # Crown uses
+    # Crown uses (how many times THEY used powers)
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             SELECT curse_used, mime_used, jester_used
@@ -942,7 +942,7 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
     jester_used = row["jester_used"] if row else 0
     total_powers = curse_used + mime_used + jester_used
 
-    # Victim stats
+    # Victim stats (how many times THEY were targeted)
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             SELECT cursed, mimed, jestered
@@ -958,16 +958,20 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
         f"# 📊 {target.display_name}'s Stats\n"
         f"🗓️ Today: **{daily}**\n"
         f"👑 Crowned: **{wins}**\n"
-        f"⚡️ Powers: **{total_powers}**\n"
-        f"-# 🙊 Mimed: **{mime_used}**\n"
-        f"-# 🤡 Jestered: **{jester_used}**\n"
-        f"-# 🔮 Cursed: **{curse_used}**"
+        f"⚡️ Powers Used: **{total_powers}**\n"
+        f"-# 🔮 Curses Cast: **{curse_used}**\n"
+        f"-# 🙊 Mimes Cast: **{mime_used}**\n"
+        f"-# 🤡 Jesters Cast: **{jester_used}**\n\n"
+        f"# 🎯 As a Victim\n"
+        f"-# 🔮 Cursed: **{cursed}**\n"
+        f"-# 🙊 Mimed: **{mimed}**\n"
+        f"-# 🤡 Jestered: **{jestered}**"
     )
 
-    # ⭐ Add profile picture
     embed.set_thumbnail(url=target.display_avatar.url)
 
     await interaction.response.send_message(embed=embed)
+
 
 
 # -----------------------------------------

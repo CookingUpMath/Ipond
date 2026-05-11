@@ -127,6 +127,10 @@ async def init_db():
 # -----------------------------------------
 
 async def get_guild_settings(guild_id: int):
+    global pool
+    if pool is None:
+        await init_db()
+
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM guild_settings WHERE guild_id = $1", guild_id)
 
@@ -338,6 +342,80 @@ async def apply_champion_role(guild: discord.Guild, new_champion: discord.Member
             await new_champion.add_roles(role, reason="Champion crowned")
         except:
             pass
+# -----------------------------------------
+# DAILY RESET HELPER
+# -----------------------------------------
+
+async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: datetime):
+    # Safety: DB must exist
+    if pool is None:
+        return
+
+    top = await get_top_user(guild.id)
+
+    if top:
+        winner_id = top["user_id"]
+
+        # Increment all-time wins
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO all_time_wins (guild_id, user_id, wins)
+                VALUES ($1, $2, 1)
+                ON CONFLICT (guild_id, user_id)
+                DO UPDATE SET wins = all_time_wins.wins + 1
+            """, guild.id, winner_id)
+
+        # Update champion in guild_settings
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE guild_settings
+                SET current_champion_id = $1,
+                    last_reset_date = $2
+                WHERE guild_id = $3
+            """, winner_id, now.date(), guild.id)
+
+        # Update nickname with crown if champion VC is set
+        if settings["champion_vc_id"]:
+            member = guild.get_member(winner_id)
+            if member:
+                try:
+                    if "👑" not in member.display_name:
+                        await member.edit(nick=f"{member.display_name} 👑")
+                except:
+                    pass
+
+        # ⭐ Apply champion role if set
+        winner_member = guild.get_member(winner_id)
+        if winner_member:
+            await apply_champion_role(guild, winner_member)
+
+            # Update bot status to show the new champion
+            await bot.change_presence(
+                activity=discord.Activity(
+                    type=discord.ActivityType.playing,
+                    name=f"👑 {winner_member.display_name}"
+                )
+            )
+
+        # Announce winner
+        if settings["announce_channel_id"]:
+            channel = guild.get_channel(settings["announce_channel_id"])
+            if channel:
+                reset_hour = settings["reset_hour"]
+                reset_minute = settings["reset_minute"]
+                embed = discord.Embed(
+                    title="",
+                    color=discord.Color.gold()
+                )
+                embed.description = (
+                    "# 🏆 Daily Champion\n"
+                    f"-# Reset Time: {reset_hour:02d}:{reset_minute:02d} {settings['timezone_str']}\n\n"
+                    f"👑 **<@{winner_id}>** is today's champion with **{top['count']} messages!**"
+                )
+                await channel.send(embed=embed)
+
+    # Reset daily counts
+    await reset_daily_counts(guild.id)
 
 
 # -----------------------------------------
@@ -346,6 +424,9 @@ async def apply_champion_role(guild: discord.Guild, new_champion: discord.Member
 
 @tasks.loop(minutes=1)
 async def daily_reset_loop():
+    if pool is None:
+        return
+
     for guild in bot.guilds:
         settings = await get_guild_settings(guild.id)
         tz = get_tz(settings)
@@ -356,71 +437,7 @@ async def daily_reset_loop():
 
         # Time to reset?
         if now.hour == reset_hour and now.minute == reset_minute:
-
-            top = await get_top_user(guild.id)
-
-            if top:
-                winner_id = top["user_id"]
-
-                # Increment all-time wins
-                async with pool.acquire() as conn:
-                    await conn.execute("""
-                        INSERT INTO all_time_wins (guild_id, user_id, wins)
-                        VALUES ($1, $2, 1)
-                        ON CONFLICT (guild_id, user_id)
-                        DO UPDATE SET wins = all_time_wins.wins + 1
-                    """, guild.id, winner_id)
-
-                # Update champion in guild_settings
-                async with pool.acquire() as conn:
-                    await conn.execute("""
-                        UPDATE guild_settings
-                        SET current_champion_id = $1,
-                            last_reset_date = $2
-                        WHERE guild_id = $3
-                    """, winner_id, now.date(), guild.id)
-
-                # Update nickname with crown if champion VC is set
-                if settings["champion_vc_id"]:
-                    member = guild.get_member(winner_id)
-                    if member:
-                        try:
-                            if "👑" not in member.display_name:
-                                await member.edit(nick=f"{member.display_name} 👑")
-                        except:
-                            pass
-
-                # ⭐ Apply champion role if set
-                winner_member = guild.get_member(winner_id)
-                if winner_member:
-                    await apply_champion_role(guild, winner_member)
-                            
-                # Update bot status to show the new champion
-                await bot.change_presence(
-                activity=discord.Activity(
-                type=discord.ActivityType.playing,
-                name=f"👑 {winner_member.display_name}"
-                 )
-                )
-
-
-                # Announce winner
-                if settings["announce_channel_id"]:
-                    channel = guild.get_channel(settings["announce_channel_id"])
-                    if channel:
-                        embed = discord.Embed(
-                            title="",
-                            color=discord.Color.gold()
-                        )
-                        embed.description = (
-                            "# 🏆 Daily Champion\n"
-                            f"-# Reset Time: {reset_hour:02d}:{reset_minute:02d} {settings['timezone_str']}\n\n"
-                            f"👑 **<@{winner_id}>** is today's champion with **{top['count']} messages!**"
-                        )
-                        await channel.send(embed=embed)
-
-            # Reset daily counts
-            await reset_daily_counts(guild.id)
+            await perform_reset_for_guild(guild, settings, now)
 
 
 # -----------------------------------------
@@ -477,7 +494,7 @@ async def leaderboard(interaction: discord.Interaction):
     for i, row in enumerate(all_rows, start=1):
         user = interaction.guild.get_member(row["user_id"])
         name = user.display_name if user else f"User {row['user_id']}"
-        wins = row["wins"]
+        wins = row["wins"] if row else 0
 
         if i == 1:
             all_lines.append(f"** 🥇 {name} - {wins} **")
@@ -680,8 +697,6 @@ async def jester(interaction: discord.Interaction, member: discord.Member):
     )
 
     await interaction.response.send_message(embed=embed)
-
-
 # -----------------------------------------
 # PART 4 — ADMIN SETTINGS (SLASH COMMANDS)
 # -----------------------------------------
@@ -715,7 +730,6 @@ async def setrole(interaction: discord.Interaction, role: discord.Role):
     )
 
     await interaction.response.send_message(embed=embed)
-
 
 
 # -----------------------------------------
@@ -761,7 +775,6 @@ async def setchampionvc(interaction: discord.Interaction, channel: discord.Voice
     embed.description = (
         "# 🎧 Champion VC Updated\n"
         f"-# New VC: **{channel.name}**\n"
-    
     )
 
     await interaction.response.send_message(embed=embed)
@@ -827,6 +840,34 @@ async def setreset(interaction: discord.Interaction, hour: int, minute: int):
 
 
 # -----------------------------------------
+# /forcereset — Force a manual reset
+# -----------------------------------------
+
+@tree.command(name="forcereset", description="Force the daily reset now.")
+@admin_only()
+async def forcereset(interaction: discord.Interaction):
+
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message("❌ This command can only be used in a server.")
+        return
+
+    settings = await get_guild_settings(guild.id)
+    tz = get_tz(settings)
+    now = datetime.now(tz)
+
+    await perform_reset_for_guild(guild, settings, now)
+
+    embed = discord.Embed(color=discord.Color.red())
+    embed.description = (
+        "# 🔁 Manual Reset Triggered\n"
+        "-# The daily reset has been forced for this server."
+    )
+
+    await interaction.response.send_message(embed=embed)
+
+
+# -----------------------------------------
 # /settings
 # -----------------------------------------
 
@@ -835,16 +876,29 @@ async def settings_cmd(interaction: discord.Interaction):
 
     settings = await get_guild_settings(interaction.guild_id)
 
+    # Champion role
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT role_id FROM crown_settings
+            WHERE guild_id = $1
+        """, interaction.guild_id)
+
+    role_id = row["role_id"] if row else None
+
+    announce = f"<#{settings['announce_channel_id']}>" if settings["announce_channel_id"] else "Not set"
+    champion_vc = f"<#{settings['champion_vc_id']}>" if settings["champion_vc_id"] else "Not set"
+    champion_role = f"<@&{role_id}>" if role_id else "Not set"
+    current_champion = f"<@{settings['current_champion_id']}>" if settings["current_champion_id"] else "No champion yet"
+
     embed = discord.Embed(color=discord.Color.blurple())
     embed.description = (
         "# ⚙️ Server Settings\n"
-        f"-# Announce Channel: <#{settings['announce_channel_id']}> \n"
-        f"-# Champion VC: <#{settings['champion_vc_id']}> \n"
+        f"-# Announce Channel: {announce}\n"
+        f"-# Champion VC: {champion_vc}\n"
+        f"-# Champion Role: {champion_role}\n"
         f"-# Timezone: **{settings['timezone_str']}**\n"
         f"-# Reset Time: **{settings['reset_hour']:02d}:{settings['reset_minute']:02d}**\n"
-        f"-# Current Champion: <@{settings['current_champion_id']}>"
-        if settings["current_champion_id"]
-        else "# ⚙️ Server Settings\n-# No champion yet."
+        f"-# Current Champion: {current_champion}"
     )
 
     await interaction.response.send_message(embed=embed)
@@ -914,7 +968,6 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
     embed.set_thumbnail(url=target.display_avatar.url)
 
     await interaction.response.send_message(embed=embed)
-
 
 
 # -----------------------------------------

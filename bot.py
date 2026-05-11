@@ -288,7 +288,7 @@ async def on_message(message: discord.Message):
 
         # CURSED — 30% chance to annoy
         if cursed_user == message.author.id and curse_until and curse_until >= now_utc:
-            if random.random() < 0.30:
+            if random.random() < 0.20:
                 await message.add_reaction("🦆")
                 await message.channel.send("quack")
 
@@ -625,7 +625,7 @@ async def curse(interaction: discord.Interaction, member: discord.Member):
     embed.description = (
         "# 🦆 Curse Applied\n"
         "-# Duration: Until daily reset\n"
-        "-# Effect: 30% chance to annoy with quacks\n\n"
+        "-# Effect: 20% chance to annoy with quacks\n\n"
         f"**{member.mention}** has been **cursed**."
     )
 

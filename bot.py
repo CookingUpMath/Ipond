@@ -31,6 +31,7 @@ DATABASE_URL = os.getenv(
 
 pool: asyncpg.Pool | None = None
 
+
 async def init_db():
     global pool
     if pool is not None:
@@ -111,7 +112,7 @@ async def init_db():
         );
         """)
 
-        # ⭐ Champion role table (NEW)
+        # Champion role table
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS crown_settings (
             guild_id BIGINT PRIMARY KEY,
@@ -120,6 +121,12 @@ async def init_db():
         """)
 
     print("Database initialized and tables ensured.")
+
+
+async def ensure_db():
+    global pool
+    if pool is None:
+        await init_db()
 
 
 # -----------------------------------------
@@ -286,7 +293,7 @@ async def on_message(message: discord.Message):
                    mimed_user, mime_until,
                    jester_user, jester_until)
 
-        # CURSED — 30% chance to annoy
+        # CURSED — 20% chance to annoy
         if cursed_user == message.author.id and curse_until and curse_until >= now_utc:
             if random.random() < 0.20:
                 await message.add_reaction("🦆")
@@ -309,6 +316,7 @@ async def on_message(message: discord.Message):
                 pass
 
     await bot.process_commands(message)
+
 
 # -----------------------------------------
 # Champion Role Helper
@@ -342,6 +350,8 @@ async def apply_champion_role(guild: discord.Guild, new_champion: discord.Member
             await new_champion.add_roles(role, reason="Champion crowned")
         except:
             pass
+
+
 # -----------------------------------------
 # DAILY RESET HELPER
 # -----------------------------------------
@@ -384,7 +394,7 @@ async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: dat
                 except:
                     pass
 
-        # ⭐ Apply champion role if set
+        # Apply champion role if set
         winner_member = guild.get_member(winner_id)
         if winner_member:
             await apply_champion_role(guild, winner_member)
@@ -446,11 +456,11 @@ async def daily_reset_loop():
 
 @tree.command(name="leaderboard", description="View the daily and all-time leaderboards.")
 async def leaderboard(interaction: discord.Interaction):
+    await ensure_db()
+
     guild_id = interaction.guild_id
 
-    # -----------------------------
     # Fetch DAILY leaderboard
-    # -----------------------------
     async with pool.acquire() as conn:
         daily_rows = await conn.fetch("""
             SELECT user_id, count
@@ -478,9 +488,7 @@ async def leaderboard(interaction: discord.Interaction):
     if not daily_lines:
         daily_lines.append("▪️ No messages today.")
 
-    # -----------------------------
     # Fetch ALL-TIME leaderboard
-    # -----------------------------
     async with pool.acquire() as conn:
         all_rows = await conn.fetch("""
             SELECT user_id, wins
@@ -508,9 +516,7 @@ async def leaderboard(interaction: discord.Interaction):
     if not all_lines:
         all_lines.append("▪️ No champions yet.")
 
-    # -----------------------------
     # Build embed
-    # -----------------------------
     embed = discord.Embed(color=discord.Color.gold())
     embed.description = (
         "# 🗓️ Daily Leaderboard\n"
@@ -591,12 +597,11 @@ async def increment_victim_stat(guild_id: int, user_id: int, effect: str):
         """, guild_id, user_id)
 
 
-# -----------------------------------------
 # /curse — UNTIL DAILY RESET
-# -----------------------------------------
 
 @tree.command(name="curse", description="Curse a user until the daily reset.")
 async def curse(interaction: discord.Interaction, member: discord.Member):
+    await ensure_db()
 
     guild_id = interaction.guild_id
     user_id = interaction.user.id
@@ -632,12 +637,11 @@ async def curse(interaction: discord.Interaction, member: discord.Member):
     await interaction.response.send_message(embed=embed)
 
 
-# -----------------------------------------
 # /mime — 30 MINUTES
-# -----------------------------------------
 
 @tree.command(name="mime", description="Silence a user for 30 minutes.")
 async def mime(interaction: discord.Interaction, member: discord.Member):
+    await ensure_db()
 
     guild_id = interaction.guild_id
     user_id = interaction.user.id
@@ -659,12 +663,11 @@ async def mime(interaction: discord.Interaction, member: discord.Member):
     await interaction.response.send_message(embed=embed)
 
 
-# -----------------------------------------
 # /jester — UNTIL DAILY RESET
-# -----------------------------------------
 
 @tree.command(name="jester", description="Turn a user into a jester until the daily reset.")
 async def jester(interaction: discord.Interaction, member: discord.Member):
+    await ensure_db()
 
     guild_id = interaction.guild_id
     user_id = interaction.user.id
@@ -697,6 +700,8 @@ async def jester(interaction: discord.Interaction, member: discord.Member):
     )
 
     await interaction.response.send_message(embed=embed)
+
+
 # -----------------------------------------
 # PART 4 — ADMIN SETTINGS (SLASH COMMANDS)
 # -----------------------------------------
@@ -706,14 +711,14 @@ def admin_only():
         return interaction.user.guild_permissions.administrator
     return app_commands.check(predicate)
 
-# -----------------------------------------
+
 # /setrole — Set the champion role
-# -----------------------------------------
 
 @tree.command(name="setrole", description="Set the champion role for this server.")
 @admin_only()
 @app_commands.describe(role="The role that will be assigned to the daily champion.")
 async def setrole(interaction: discord.Interaction, role: discord.Role):
+    await ensure_db()
 
     async with pool.acquire() as conn:
         await conn.execute("""
@@ -732,13 +737,12 @@ async def setrole(interaction: discord.Interaction, role: discord.Role):
     await interaction.response.send_message(embed=embed)
 
 
-# -----------------------------------------
 # /setannounce
-# -----------------------------------------
 
 @tree.command(name="setannounce", description="Set the channel where champion announcements are posted.")
 @admin_only()
 async def setannounce(interaction: discord.Interaction, channel: discord.TextChannel):
+    await ensure_db()
 
     async with pool.acquire() as conn:
         await conn.execute("""
@@ -756,13 +760,12 @@ async def setannounce(interaction: discord.Interaction, channel: discord.TextCha
     await interaction.response.send_message(embed=embed)
 
 
-# -----------------------------------------
 # /setchampionvc
-# -----------------------------------------
 
 @tree.command(name="setchampionvc", description="Set the VC used for champion nickname styling.")
 @admin_only()
 async def setchampionvc(interaction: discord.Interaction, channel: discord.VoiceChannel):
+    await ensure_db()
 
     async with pool.acquire() as conn:
         await conn.execute("""
@@ -780,13 +783,12 @@ async def setchampionvc(interaction: discord.Interaction, channel: discord.Voice
     await interaction.response.send_message(embed=embed)
 
 
-# -----------------------------------------
 # /settimezone
-# -----------------------------------------
 
 @tree.command(name="settimezone", description="Set the server's timezone.")
 @admin_only()
 async def settimezone(interaction: discord.Interaction, timezone: str):
+    await ensure_db()
 
     try:
         pytz.timezone(timezone)
@@ -810,13 +812,12 @@ async def settimezone(interaction: discord.Interaction, timezone: str):
     await interaction.response.send_message(embed=embed)
 
 
-# -----------------------------------------
 # /setreset
-# -----------------------------------------
 
 @tree.command(name="setreset", description="Set the daily reset time (24h format).")
 @admin_only()
 async def setreset(interaction: discord.Interaction, hour: int, minute: int):
+    await ensure_db()
 
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         await interaction.response.send_message("❌ Invalid time. Use 24‑hour format.")
@@ -839,13 +840,12 @@ async def setreset(interaction: discord.Interaction, hour: int, minute: int):
     await interaction.response.send_message(embed=embed)
 
 
-# -----------------------------------------
 # /forcereset — Force a manual reset
-# -----------------------------------------
 
 @tree.command(name="forcereset", description="Force the daily reset now.")
 @admin_only()
 async def forcereset(interaction: discord.Interaction):
+    await ensure_db()
 
     guild = interaction.guild
     if guild is None:
@@ -867,12 +867,11 @@ async def forcereset(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-# -----------------------------------------
 # /settings
-# -----------------------------------------
 
 @tree.command(name="settings", description="View all server settings.")
 async def settings_cmd(interaction: discord.Interaction):
+    await ensure_db()
 
     settings = await get_guild_settings(interaction.guild_id)
 
@@ -904,12 +903,11 @@ async def settings_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-# -----------------------------------------
 # /stats
-# -----------------------------------------
 
 @tree.command(name="stats", description="View your stats or another member's stats.")
 async def stats(interaction: discord.Interaction, member: discord.Member | None = None):
+    await ensure_db()
 
     guild_id = interaction.guild_id
     target = member or interaction.user
@@ -971,7 +969,6 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
     embed.set_thumbnail(url=target.display_avatar.url)
 
     await interaction.response.send_message(embed=embed)
-
 
 
 # -----------------------------------------

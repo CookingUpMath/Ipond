@@ -118,6 +118,18 @@ async def init_db():
         );
         """)
 
+        # NEW — Daily power usage (Option A)
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS daily_power_usage (
+            guild_id BIGINT,
+            user_id BIGINT,
+            curse_used_today BOOLEAN DEFAULT FALSE,
+            mime_used_today BOOLEAN DEFAULT FALSE,
+            jester_used_today BOOLEAN DEFAULT FALSE,
+            PRIMARY KEY (guild_id, user_id)
+        );
+        """)
+
     print("Database initialized and tables ensured.")
 
 
@@ -244,6 +256,7 @@ async def apply_champion_role(guild: discord.Guild, new_champion: discord.Member
     if not role:
         return
 
+    # Remove from old champion
     for member in role.members:
         if member != new_champion:
             try:
@@ -251,13 +264,12 @@ async def apply_champion_role(guild: discord.Guild, new_champion: discord.Member
             except:
                 pass
 
+    # Apply to new champion
     if new_champion and role not in new_champion.roles:
         try:
             await new_champion.add_roles(role, reason="Champion crowned")
         except:
             pass
-
-
 # -----------------------------------------
 # ON MESSAGE — COUNT + EFFECTS
 # -----------------------------------------
@@ -301,11 +313,19 @@ async def on_message(message: discord.Message):
 
         # Mime expiry
         if mime_until and mime_until < now_utc:
+            # DM the user when mime ends naturally
+            if mimed_user:
+                member = guild.get_member(mimed_user)
+                if member:
+                    try:
+                        await member.send("🙊 You have done well mime. You may now speak!")
+                    except:
+                        pass
             mimed_user = None
             mime_until = None
             update_needed = True
 
-        # Jester expiry (also remove 🤡)
+        # Jester expiry
         if jester_until and jester_until < now_utc:
             if jester_user:
                 member = guild.get_member(jester_user)
@@ -349,18 +369,16 @@ async def on_message(message: discord.Message):
                 except:
                     pass
 
-        # MIMED — delete only messages containing text (emoji/stickers/images/GIFs allowed)
+        # MIMED — delete only messages containing text
         if mimed_user == message.author.id and mime_until and mime_until >= now_utc:
             content = message.content
 
-            # If there's any non-empty text, decide if it's emoji-only or not
             if content and content.strip():
                 stripped = content.strip()
 
                 def is_emoji_char(c: str) -> bool:
                     return c in emoji.EMOJI_DATA
 
-                # If NOT all chars are emoji or whitespace → delete
                 if not all(is_emoji_char(c) or c.isspace() for c in stripped):
                     try:
                         await message.delete()
@@ -368,7 +386,6 @@ async def on_message(message: discord.Message):
                         pass
                     return
 
-            # If no text or emoji-only text, allow (attachments/stickers/GIFs are fine)
             await bot.process_commands(message)
             return
 
@@ -386,6 +403,14 @@ async def on_message(message: discord.Message):
 # -----------------------------------------
 # DAILY RESET LOGIC
 # -----------------------------------------
+
+async def reset_daily_power_usage(guild_id: int):
+    await ensure_db()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            DELETE FROM daily_power_usage WHERE guild_id = $1
+        """, guild_id)
+
 
 async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: datetime):
     await ensure_db()
@@ -475,6 +500,9 @@ async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: dat
     # Reset daily counts
     await reset_daily_counts(guild.id)
 
+    # Reset daily power usage
+    await reset_daily_power_usage(guild.id)
+
     # Clear active effects
     await ensure_db()
     async with pool.acquire() as conn:
@@ -514,153 +542,47 @@ async def daily_reset_loop():
 
         if now.hour == reset_hour and now.minute == reset_minute:
             await perform_reset_for_guild(guild, settings, now)
-
-
 # -----------------------------------------
-# LEADERBOARD
+# DAILY POWER USAGE HELPERS
 # -----------------------------------------
 
-@tree.command(name="leaderboard", description="View the daily and all-time leaderboards.")
-async def leaderboard(interaction: discord.Interaction):
-    guild_id = interaction.guild_id
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        daily_rows = await conn.fetch("""
-            SELECT user_id, count
-            FROM message_counts
-            WHERE guild_id = $1
-            ORDER BY count DESC
-            LIMIT 10
-        """, guild_id)
-
-    daily_lines = []
-    for i, row in enumerate(daily_rows, start=1):
-        user = interaction.guild.get_member(row["user_id"])
-        name = user.display_name if user else f"User {row['user_id']}"
-        count = row["count"]
-
-        if i == 1:
-            daily_lines.append(f"** 🥇 {name} - {count} **")
-        elif i == 2:
-            daily_lines.append(f"** 🥈 {name} - {count} **")
-        elif i == 3:
-            daily_lines.append(f"** 🥉 {name} - {count} **")
-        else:
-            daily_lines.append(f"▪️ {name} - {count}")
-
-    if not daily_lines:
-        daily_lines.append("▪️ No messages today.")
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        all_rows = await conn.fetch("""
-            SELECT user_id, wins
-            FROM all_time_wins
-            WHERE guild_id = $1
-            ORDER BY wins DESC
-            LIMIT 10
-        """, guild_id)
-
-    all_lines = []
-    for i, row in enumerate(all_rows, start=1):
-        user = interaction.guild.get_member(row["user_id"])
-        name = user.display_name if user else f"User {row['user_id']}"
-        wins = row["wins"] if row else 0
-
-        if i == 1:
-            all_lines.append(f"** 🥇 {name} - {wins} **")
-        elif i == 2:
-            all_lines.append(f"** 🥈 {name} - {wins} **")
-        elif i == 3:
-            all_lines.append(f"** 🥉 {name} - {wins} **")
-        else:
-            all_lines.append(f"▪️ {name} - {wins}")
-
-    if not all_lines:
-        all_lines.append("▪️ No champions yet.")
-
-    embed = discord.Embed(color=discord.Color.gold())
-    embed.description = (
-        "# 🗓️ Daily Leaderboard\n"
-        + "\n".join(daily_lines)
-        + "\n\n# 🏆 Overall Leaderboard\n"
-        + "\n".join(all_lines)
-    )
-
-    await interaction.response.send_message(embed=embed)
-
-# -----------------------------------------
-# PART 3 — CROWN POWERS (HELPERS)
-# -----------------------------------------
-
-async def set_active_effect(guild_id: int, effect: str, user_id: int, until: datetime):
-    column_user = {
-        "curse": "cursed_user",
-        "mime": "mimed_user",
-        "jester": "jester_user"
-    }.get(effect)
-
-    column_until = {
-        "curse": "curse_until",
-        "mime": "mime_until",
-        "jester": "jester_until"
-    }.get(effect)
-
-    if not column_user or not column_until:
-        return
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        await conn.execute(f"""
-            INSERT INTO active_effects (guild_id, {column_user}, {column_until})
-            VALUES ($1, $2, $3)
-            ON CONFLICT (guild_id)
-            DO UPDATE SET
-                {column_user} = EXCLUDED.{column_user},
-                {column_until} = EXCLUDED.{column_until}
-        """, guild_id, user_id, until)
-
-
-async def increment_crown_use(guild_id: int, user_id: int, effect: str):
+async def check_power_used(guild_id: int, user_id: int, power: str) -> bool:
     column = {
-        "curse": "curse_used",
-        "mime": "mime_used",
-        "jester": "jester_used"
-    }.get(effect)
+        "curse": "curse_used_today",
+        "mime": "mime_used_today",
+        "jester": "jester_used_today"
+    }.get(power)
 
-    if not column:
-        return
+    await ensure_db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(f"""
+            SELECT {column} FROM daily_power_usage
+            WHERE guild_id = $1 AND user_id = $2
+        """, guild_id, user_id)
+
+    return row and row[column]
+
+
+async def mark_power_used(guild_id: int, user_id: int, power: str):
+    column = {
+        "curse": "curse_used_today",
+        "mime": "mime_used_today",
+        "jester": "jester_used_today"
+    }.get(power)
 
     await ensure_db()
     async with pool.acquire() as conn:
         await conn.execute(f"""
-            INSERT INTO crown_uses (guild_id, user_id, {column})
-            VALUES ($1, $2, 1)
+            INSERT INTO daily_power_usage (guild_id, user_id, {column})
+            VALUES ($1, $2, TRUE)
             ON CONFLICT (guild_id, user_id)
-            DO UPDATE SET {column} = crown_uses.{column} + 1
+            DO UPDATE SET {column} = TRUE
         """, guild_id, user_id)
 
 
-async def increment_victim_stat(guild_id: int, user_id: int, effect: str):
-    column = {
-        "curse": "cursed",
-        "mime": "mimed",
-        "jester": "jestered"
-    }.get(effect)
-
-    if not column:
-        return
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        await conn.execute(f"""
-            INSERT INTO victim_stats (guild_id, user_id, {column})
-            VALUES ($1, $2, 1)
-            ON CONFLICT (guild_id, user_id)
-            DO UPDATE SET {column} = victim_stats.{column} + 1
-        """, guild_id, user_id)
-
+# -----------------------------------------
+# CROWN POWER PERMISSION CHECK
+# -----------------------------------------
 
 async def ensure_champion_role_holder(interaction: discord.Interaction) -> bool:
     guild = interaction.guild
@@ -698,7 +620,7 @@ async def ensure_champion_role_holder(interaction: discord.Interaction) -> bool:
 
 
 # -----------------------------------------
-# /curse — UNTIL DAILY RESET
+# /curse — ONCE PER RESET
 # -----------------------------------------
 
 @tree.command(name="curse", description="Curse a user until the daily reset.")
@@ -710,6 +632,11 @@ async def curse(interaction: discord.Interaction, member: discord.Member):
     guild_id = interaction.guild_id
     user_id = interaction.user.id
 
+    if await check_power_used(guild_id, user_id, "curse"):
+        await interaction.response.send_message("❌ You have already used **Curse** today.")
+        return
+
+    await mark_power_used(guild_id, user_id, "curse")
     await increment_crown_use(guild_id, user_id, "curse")
     await increment_victim_stat(guild_id, member.id, "curse")
 
@@ -740,7 +667,7 @@ async def curse(interaction: discord.Interaction, member: discord.Member):
 
 
 # -----------------------------------------
-# /mime — 30 MINUTES (emoji-only allowed)
+# /mime — ONCE PER RESET
 # -----------------------------------------
 
 @tree.command(name="mime", description="Silence a user for 30 minutes (emoji-only messages allowed).")
@@ -752,6 +679,11 @@ async def mime(interaction: discord.Interaction, member: discord.Member):
     guild_id = interaction.guild_id
     user_id = interaction.user.id
 
+    if await check_power_used(guild_id, user_id, "mime"):
+        await interaction.response.send_message("❌ You have already used **Mime** today.")
+        return
+
+    await mark_power_used(guild_id, user_id, "mime")
     await increment_crown_use(guild_id, user_id, "mime")
     await increment_victim_stat(guild_id, member.id, "mime")
 
@@ -770,7 +702,7 @@ async def mime(interaction: discord.Interaction, member: discord.Member):
 
 
 # -----------------------------------------
-# /jester — UNTIL 5 MINUTES BEFORE RESET
+# /jester — ONCE PER RESET
 # -----------------------------------------
 
 @tree.command(name="jester", description="Turn a user into a jester until 5 minutes before the daily reset.")
@@ -782,6 +714,11 @@ async def jester(interaction: discord.Interaction, member: discord.Member):
     guild_id = interaction.guild_id
     user_id = interaction.user.id
 
+    if await check_power_used(guild_id, user_id, "jester"):
+        await interaction.response.send_message("❌ You have already used **Jester** today.")
+        return
+
+    await mark_power_used(guild_id, user_id, "jester")
     await increment_crown_use(guild_id, user_id, "jester")
     await increment_victim_stat(guild_id, member.id, "jester")
 
@@ -814,7 +751,7 @@ async def jester(interaction: discord.Interaction, member: discord.Member):
 
 
 # -----------------------------------------
-# PART 4 — ADMIN SETTINGS
+# /reseteffects — ADMIN (BEGINNING)
 # -----------------------------------------
 
 def admin_only():
@@ -823,327 +760,128 @@ def admin_only():
     return app_commands.check(predicate)
 
 
-# /setrole — Set the champion role
-@tree.command(name="setrole", description="Set the champion role for this server.")
+@tree.command(name="reseteffects", description="Reset all crown effects or a specific user's effects.")
 @admin_only()
-@app_commands.describe(role="The role that will be assigned to the daily champion.")
-async def setrole(interaction: discord.Interaction, role: discord.Role):
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO crown_settings (guild_id, role_id)
-            VALUES ($1, $2)
-            ON CONFLICT (guild_id)
-            DO UPDATE SET role_id = EXCLUDED.role_id
-        """, interaction.guild_id, role.id)
-
-    embed = discord.Embed(color=discord.Color.gold())
-    embed.description = (
-        "# 👑 Champion Role Updated\n"
-        f"-# New Role: {role.mention}"
-    )
-
-    await interaction.response.send_message(embed=embed)
-
-
-# /setannounce
-@tree.command(name="setannounce", description="Set the channel where champion announcements are posted.")
-@admin_only()
-async def setannounce(interaction: discord.Interaction, channel: discord.TextChannel):
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE guild_settings
-            SET announce_channel_id = $1
-            WHERE guild_id = $2
-        """, channel.id, interaction.guild_id)
-
-    embed = discord.Embed(color=discord.Color.blurple())
-    embed.description = (
-        "# 📢 Announce Channel Updated\n"
-        f"-# New Channel: {channel.mention}"
-    )
-
-    await interaction.response.send_message(embed=embed)
-
-
-# /setchampionvc
-@tree.command(name="setchampionvc", description="Set the VC used for champion nickname styling.")
-@admin_only()
-async def setchampionvc(interaction: discord.Interaction, channel: discord.VoiceChannel):
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE guild_settings
-            SET champion_vc_id = $1
-            WHERE guild_id = $2
-        """, channel.id, interaction.guild_id)
-
-    embed = discord.Embed(color=discord.Color.gold())
-    embed.description = (
-        "# 🎧 Champion VC Updated\n"
-        f"-# New VC: **{channel.name}**\n"
-    )
-
-    await interaction.response.send_message(embed=embed)
-
-
-# /settimezone
-@tree.command(name="settimezone", description="Set the server's timezone.")
-@admin_only()
-async def settimezone(interaction: discord.Interaction, timezone: str):
-
-    try:
-        pytz.timezone(timezone)
-    except:
-        await interaction.response.send_message("❌ Invalid timezone. Example: `EST`, `UTC`, `America/New_York`")
-        return
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE guild_settings
-            SET timezone_str = $1
-            WHERE guild_id = $2
-        """, timezone, interaction.guild_id)
-
-    embed = discord.Embed(color=discord.Color.green())
-    embed.description = (
-        "# ⏰ Timezone Updated\n"
-        f"-# New Timezone: **{timezone}**"
-    )
-
-    await interaction.response.send_message(embed=embed)
-
-
-# /setreset
-@tree.command(name="setreset", description="Set the daily reset time (24h format).")
-@admin_only()
-async def setreset(interaction: discord.Interaction, hour: int, minute: int):
-
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        await interaction.response.send_message("❌ Invalid time. Use 24‑hour format.")
-        return
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE guild_settings
-            SET reset_hour = $1,
-                reset_minute = $2
-            WHERE guild_id = $3
-        """, hour, minute, interaction.guild_id)
-
-    embed = discord.Embed(color=discord.Color.orange())
-    embed.description = (
-        "# ⏳ Reset Time Updated\n"
-        f"-# New Time: **{hour:02d}:{minute:02d}**"
-    )
-
-    await interaction.response.send_message(embed=embed)
-
-
-# /forcereset
-@tree.command(name="forcereset", description="Force the daily reset now.")
-@admin_only()
-async def forcereset(interaction: discord.Interaction):
+async def reseteffects(interaction: discord.Interaction, member: discord.Member | None = None):
 
     guild = interaction.guild
-    if guild is None:
-        await interaction.response.send_message("❌ This command can only be used in a server.")
+    settings = await get_guild_settings(guild.id)
+
+    await ensure_db()
+    async with pool.acquire() as conn:
+        effect = await conn.fetchrow("""
+            SELECT * FROM active_effects WHERE guild_id = $1
+        """, guild.id)
+    # RESET ALL EFFECTS
+    if member is None:
+        mimed_users = []
+        jester_users = []
+
+        if effect:
+            if effect["mimed_user"]:
+                mimed_users.append(effect["mimed_user"])
+            if effect["jester_user"]:
+                jester_users.append(effect["jester_user"])
+
+        # DM mimed users
+        for uid in mimed_users:
+            user = guild.get_member(uid)
+            if user:
+                try:
+                    await user.send("🙊 You have done well mime. You may now speak!")
+                except:
+                    pass
+
+        # Remove 🤡 from jester users
+        for uid in jester_users:
+            user = guild.get_member(uid)
+            if user:
+                try:
+                    new_name = clean_display_name(user.display_name)
+                    if new_name != user.display_name:
+                        await user.edit(nick=new_name)
+                except:
+                    pass
+
+        # Clear effects
+        await ensure_db()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE active_effects
+                SET cursed_user = NULL,
+                    curse_until = NULL,
+                    mimed_user = NULL,
+                    mime_until = NULL,
+                    jester_user = NULL,
+                    jester_until = NULL
+                WHERE guild_id = $1
+            """, guild.id)
+
+        # Reset daily power usage
+        await reset_daily_power_usage(guild.id)
+
+        # Announce
+        if settings["announce_channel_id"]:
+            channel = guild.get_channel(settings["announce_channel_id"])
+            if channel:
+                try:
+                    await channel.send("🔧 All crown effects have been reset by an admin.")
+                except:
+                    pass
+
+        await interaction.response.send_message("✅ All effects have been reset.")
         return
 
-    settings = await get_guild_settings(guild.id)
-    tz = get_tz(settings)
-    now = datetime.now(tz)
-
-    await perform_reset_for_guild(guild, settings, now)
-
-    embed = discord.Embed(color=discord.Color.red())
-    embed.description = (
-        "# 🔁 Manual Reset Triggered\n"
-        "-# The daily reset has been forced for this server."
-    )
-
-    await interaction.response.send_message(embed=embed)
-
-# /setchampion — Manually set the current champion
-@tree.command(name="setchampion", description="Manually set the current champion and award them a win.")
-@admin_only()
-async def setchampion(interaction: discord.Interaction, member: discord.Member):
-
-    guild = interaction.guild
-    if guild is None:
-        await interaction.response.send_message("❌ This command can only be used in a server.")
+    # RESET ONE USER'S EFFECTS
+    target = member
+    if not effect or (
+        effect["cursed_user"] != target.id and
+        effect["mimed_user"] != target.id and
+        effect["jester_user"] != target.id
+    ):
+        await interaction.response.send_message("❌ That member has no active effects.")
         return
 
-    settings = await get_guild_settings(guild.id)
-    tz = get_tz(settings)
-    now = datetime.now(tz)
+    # DM if mimed
+    if effect["mimed_user"] == target.id:
+        try:
+            await target.send("🙊 You have done well mime. You may now speak!")
+        except:
+            pass
 
+    # Remove 🤡 if jestered
+    if effect["jester_user"] == target.id:
+        try:
+            new_name = clean_display_name(target.display_name)
+            if new_name != target.display_name:
+                await target.edit(nick=new_name)
+        except:
+            pass
+
+    # Clear this user's effects
     await ensure_db()
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO all_time_wins (guild_id, user_id, wins)
-            VALUES ($1, $2, 1)
-            ON CONFLICT (guild_id, user_id)
-            DO UPDATE SET wins = all_time_wins.wins + 1
-        """, guild.id, member.id)
-
-        await conn.execute("""
-            UPDATE guild_settings
-            SET current_champion_id = $1,
-                last_reset_date = $2
-            WHERE guild_id = $3
-        """, member.id, now.date(), guild.id)
-
-    await apply_champion_role(guild, member)
-
-    display_name = clean_display_name(member.display_name)
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT role_id FROM crown_settings WHERE guild_id = $1",
-            guild.id
-        )
-
-    if row and row["role_id"]:
-        role = guild.get_role(row["role_id"])
-        if role:
-            try:
-                await role.edit(name=f"👑 {display_name}")
-            except:
-                pass
-
-    if settings["champion_vc_id"]:
-        vc = guild.get_channel(settings["champion_vc_id"])
-        if isinstance(vc, discord.VoiceChannel):
-            try:
-                await vc.edit(name=f"👑: {display_name}")
-            except:
-                pass
-
-    try:
-        await bot.change_presence(
-            activity=discord.Activity(
-                type=discord.ActivityType.playing,
-                name=f"👑 {display_name}"
-            )
-        )
-    except:
-        pass
-
-    embed = discord.Embed(color=discord.Color.gold())
-    embed.description = (
-        "# 👑 Champion Manually Set\n"
-        f"-# New Champion: {member.mention}"
-    )
-
-    await interaction.response.send_message(embed=embed)
-
-
-# /settings
-@tree.command(name="settings", description="View all server settings.")
-async def settings_cmd(interaction: discord.Interaction):
-
-    settings = await get_guild_settings(interaction.guild_id)
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            SELECT role_id FROM crown_settings
+            UPDATE active_effects
+            SET cursed_user = CASE WHEN cursed_user = $2 THEN NULL ELSE cursed_user END,
+                curse_until = CASE WHEN cursed_user = $2 THEN NULL ELSE curse_until END,
+                mimed_user = CASE WHEN mimed_user = $2 THEN NULL ELSE mimed_user END,
+                mime_until = CASE WHEN mimed_user = $2 THEN NULL ELSE mime_until END,
+                jester_user = CASE WHEN jester_user = $2 THEN NULL ELSE jester_user END,
+                jester_until = CASE WHEN jester_user = $2 THEN NULL ELSE jester_until END
             WHERE guild_id = $1
-        """, interaction.guild_id)
+        """, guild.id, target.id)
 
-    role_id = row["role_id"] if row else None
+    # Announce
+    if settings["announce_channel_id"]:
+        channel = guild.get_channel(settings["announce_channel_id"])
+        if channel:
+            try:
+                await channel.send(f"🔧 Crown effects have been reset for {target.mention} by an admin.")
+            except:
+                pass
 
-    announce = f"<#{settings['announce_channel_id']}>" if settings["announce_channel_id"] else "Not set"
-    champion_vc = f"<#{settings['champion_vc_id']}>" if settings["champion_vc_id"] else "Not set"
-    champion_role = f"<@&{role_id}>" if role_id else "Not set"
-    current_champion = f"<@{settings['current_champion_id']}>" if settings["current_champion_id"] else "No champion yet"
-
-    embed = discord.Embed(color=discord.Color.blurple())
-    embed.description = (
-        "# ⚙️ Server Settings\n"
-        f"-# Announce Channel: {announce}\n"
-        f"-# Champion VC: {champion_vc}\n"
-        f"-# Champion Role: {champion_role}\n"
-        f"-# Timezone: **{settings['timezone_str']}**\n"
-        f"-# Reset Time: **{settings['reset_hour']:02d}:{settings['reset_minute']:02d}**\n"
-        f"-# Current Champion: {current_champion}"
-    )
-
-    await interaction.response.send_message(embed=embed)
-
-
-# /stats
-@tree.command(name="stats", description="View your stats or another member's stats.")
-async def stats(interaction: discord.Interaction, member: discord.Member | None = None):
-
-    guild_id = interaction.guild_id
-    target = member or interaction.user
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            SELECT count FROM message_counts
-            WHERE guild_id = $1 AND user_id = $2
-        """, guild_id, target.id)
-    daily = row["count"] if row else 0
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            SELECT wins FROM all_time_wins
-            WHERE guild_id = $1 AND user_id = $2
-        """, guild_id, target.id)
-    wins = row["wins"] if row else 0
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            SELECT curse_used, mime_used, jester_used
-            FROM crown_uses
-            WHERE guild_id = $1 AND user_id = $2
-        """, guild_id, target.id)
-    curse_used = row["curse_used"] if row else 0
-    mime_used = row["mime_used"] if row else 0
-    jester_used = row["jester_used"] if row else 0
-    total_powers = curse_used + mime_used + jester_used
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            SELECT cursed, mimed, jestered
-            FROM victim_stats
-            WHERE guild_id = $1 AND user_id = $2
-        """, guild_id, target.id)
-    cursed = row["cursed"] if row else 0
-    mimed = row["mimed"] if row else 0
-    jestered = row["jestered"] if row else 0
-
-    embed = discord.Embed(color=discord.Color.blurple())
-    embed.description = (
-        f"# 📊 {target.display_name}'s Stats\n"
-        f"🗓️ Today: **{daily}**\n"
-        f"👑 Crowned: **{wins}**\n"
-        f"⚡️ Powers Used: **{total_powers}**\n"
-        f"-# 🔮 Curses Cast: **{curse_used}**\n"
-        f"-# 🙊 Mimes Cast: **{mime_used}**\n"
-        f"-# 🤡 Jesters Cast: **{jester_used}**\n\n"
-        f"# 🎯 As a Victim\n"
-        f"-# 🔮 Cursed: **{cursed}**\n"
-        f"-# 🙊 Mimed: **{mimed}**\n"
-        f"-# 🤡 Jestered: **{jestered}**"
-    )
-
-    embed.set_thumbnail(url=target.display_avatar.url)
-
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(f"✅ All effects cleared for {target.mention}.")
 
 
 # -----------------------------------------

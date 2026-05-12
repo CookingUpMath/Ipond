@@ -6,6 +6,7 @@ import os
 import random
 from datetime import datetime, timedelta
 import pytz
+import emoji
 
 # -----------------------------------------
 # BOT + INTENTS
@@ -314,13 +315,28 @@ async def on_message(message: discord.Message):
                 await message.add_reaction("🦆")
                 await message.channel.send("quack")
 
-        # MIMED — delete message
-        if mimed_user == message.author.id and mime_until and mime_until >= now_utc:
-            try:
-                await message.delete()
-            except:
-                pass
-            return
+       # MIMED — delete only text messages (emoji-only allowed)
+if mimed_user == message.author.id and mime_until and mime_until >= now_utc:
+    content = message.content.strip()
+
+    # Allow stickers and GIFs
+    if message.stickers or (message.attachments and all(a.content_type and "gif" in a.content_type for a in message.attachments)):
+        return
+
+    # Allow emoji-only messages
+    def is_emoji(char):
+        return char in emoji.EMOJI_DATA  # requires "import emoji"
+
+    if content and all(is_emoji(c) for c in content):
+        return  # allow emoji-only
+
+    # Otherwise delete
+    try:
+        await message.delete()
+    except:
+        pass
+    return
+
 
         # JESTER — add 🤡 to nickname while active
         if jester_user == message.author.id and jester_until and jester_until >= now_utc:

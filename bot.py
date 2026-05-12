@@ -701,7 +701,7 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
         """, guild_id, user_id)
     win_count = wins["wins"] if wins else 0
 
-    # Crown powers casted BY user
+    # Casted stats
     async with pool.acquire() as conn:
         uses = await conn.fetchrow("""
             SELECT curse_used, mime_used, jester_used
@@ -713,7 +713,7 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
     mime_casted = uses["mime_used"] if uses else 0
     jester_casted = uses["jester_used"] if uses else 0
 
-    # Victim stats (used ON user)
+    # Received stats
     async with pool.acquire() as conn:
         victim = await conn.fetchrow("""
             SELECT cursed, mimed, jestered
@@ -725,17 +725,21 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
     mimed_on = victim["mimed"] if victim else 0
     jestered_on = victim["jestered"] if victim else 0
 
-    # Totals
     total_casted = curse_casted + mime_casted + jester_casted
+
+    # -----------------------------------------
+    # COLOR — use user's role color
+    # -----------------------------------------
+
+    user_color = user.color if user.color.value != 0 else discord.Color.blurple()
 
     # -----------------------------------------
     # BUILD EMBED
     # -----------------------------------------
 
-    embed = discord.Embed(color=discord.Color.blurple())
+    embed = discord.Embed(color=user_color)
     embed.set_thumbnail(url=user.display_avatar.url)
 
-    # Header
     embed.description = (
         f"# 🗯️ {user.display_name}'s Stats\n"
         f"🗓️ Messages Today: **{daily_count}**\n"
@@ -744,29 +748,29 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
         f"# 👑 Royal Stats"
     )
 
-    # FIELD 1 — CASTED
-    embed.add_field(
-        name="⚡ Casted",
-        value=(
-            f"🙊 Mime: **{mime_casted}**\n"
-            f"🤡 Jester: **{jester_casted}**\n"
-            f"🔮 Curse: **{curse_casted}**"
-        ),
-        inline=True
+    # CASTED TABLE
+    casted_table = (
+        "```text\n"
+        f"🙊 Mime     | {mime_casted:>4}\n"
+        f"🤡 Jester   | {jester_casted:>4}\n"
+        f"🔮 Curse    | {curse_casted:>4}\n"
+        "```"
     )
 
-    # FIELD 2 — RECEIVED
-    embed.add_field(
-        name="🎯 Received",
-        value=(
-            f"🙊 Mime: **{mimed_on}**\n"
-            f"🤡 Jester: **{jestered_on}**\n"
-            f"🔮 Curse: **{cursed_on}**"
-        ),
-        inline=True
+    # RECEIVED TABLE
+    received_table = (
+        "```text\n"
+        f"🙊 Mime     | {mimed_on:>4}\n"
+        f"🤡 Jester   | {jestered_on:>4}\n"
+        f"🔮 Curse    | {cursed_on:>4}\n"
+        "```"
     )
+
+    embed.add_field(name="⚡ Casted", value=casted_table, inline=True)
+    embed.add_field(name="🎯 Received", value=received_table, inline=True)
 
     await interaction.response.send_message(embed=embed)
+
 
 
 

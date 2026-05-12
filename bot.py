@@ -745,32 +745,15 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
         f"🗓️ Messages Today: **{daily_count}**\n"
         f"👑 Crowned: **{win_count}**\n"
         f"⚡ Powers Used: **{total_casted}**\n\n"
-        f"# 👑 Royal Stats"
+        f"# ⚡️ Royal Powers\n"
+        f"-# 🙊 Mime: **{mime_casted} | {mimed_on}**\n"
+        f"-# 🤡 Jester: **{jester_casted} | {jestered_on}**\n"
+        f"-# 🔮 Curse: **{curse_casted} | {cursed_on}**"
     )
 
-    # CASTED TABLE
-    casted_table = (
-        "```text\n"
-        f"🙊 Mime     | {mime_casted:>4}\n"
-        f"🤡 Jester   | {jester_casted:>4}\n"
-        f"🔮 Curse    | {curse_casted:>4}\n"
-        "```"
-    )
-
-    # RECEIVED TABLE
-    received_table = (
-        "```text\n"
-        f"🙊 Mime     | {mimed_on:>4}\n"
-        f"🤡 Jester   | {jestered_on:>4}\n"
-        f"🔮 Curse    | {cursed_on:>4}\n"
-        "```"
-    )
-
-    embed.add_field(name="⚡ Casted", value=casted_table, inline=True)
-    embed.add_field(name="🎯 Received", value=received_table, inline=True)
+    embed.set_footer(text="⚠️ Stats are Sent | Received")
 
     await interaction.response.send_message(embed=embed)
-
 
 
 

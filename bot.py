@@ -670,6 +670,82 @@ async def leaderboard(interaction: discord.Interaction):
     )
 
     await interaction.response.send_message(embed=embed)
+    
+# -----------------------------------------
+# /stats — VIEW USER STATS
+# -----------------------------------------
+
+@tree.command(name="stats", description="View your stats or another member's stats.")
+async def stats(interaction: discord.Interaction, member: discord.Member | None = None):
+
+    guild = interaction.guild
+    user = member or interaction.user
+    guild_id = guild.id
+    user_id = user.id
+
+    await ensure_db()
+
+    # Fetch daily messages
+    async with pool.acquire() as conn:
+        daily = await conn.fetchrow("""
+            SELECT count FROM message_counts
+            WHERE guild_id = $1 AND user_id = $2
+        """, guild_id, user_id)
+
+    daily_count = daily["count"] if daily else 0
+
+    # Fetch all-time wins
+    async with pool.acquire() as conn:
+        wins = await conn.fetchrow("""
+            SELECT wins FROM all_time_wins
+            WHERE guild_id = $1 AND user_id = $2
+        """, guild_id, user_id)
+
+    win_count = wins["wins"] if wins else 0
+
+    # Fetch crown uses
+    async with pool.acquire() as conn:
+        uses = await conn.fetchrow("""
+            SELECT curse_used, mime_used, jester_used
+            FROM crown_uses
+            WHERE guild_id = $1 AND user_id = $2
+        """, guild_id, user_id)
+
+    curse_used = uses["curse_used"] if uses else 0
+    mime_used = uses["mime_used"] if uses else 0
+    jester_used = uses["jester_used"] if uses else 0
+
+    total_powers = curse_used + mime_used + jester_used
+
+    # Fetch victim stats
+    async with pool.acquire() as conn:
+        victim = await conn.fetchrow("""
+            SELECT cursed, mimed, jestered
+            FROM victim_stats
+            WHERE guild_id = $1 AND user_id = $2
+        """, guild_id, user_id)
+
+    cursed = victim["cursed"] if victim else 0
+    mimed = victim["mimed"] if victim else 0
+    jestered = victim["jestered"] if victim else 0
+
+    # Build embed
+    embed = discord.Embed(color=discord.Color.gold())
+    embed.set_author(name=f"{user.display_name}'s Stats", icon_url=user.display_avatar.url)
+
+    embed.description = (
+        "# 📊 Shaun's Stats\n"
+        f"🗓️ Today: **{daily_count}**\n"
+        f"👑 Crowned: **{win_count}**\n"
+        f"⚡ Powers: **{total_powers}**\n"
+        f"-# 🙊 Mimed: **{mimed}**\n"
+        f"-# 🤡 Jestered: **{jestered}**\n"
+        f"-# 🔮 Cursed: **{cursed}**"
+    )
+
+    await interaction.response.send_message(embed=embed)
+
+
 # -----------------------------------------
 # DAILY POWER USAGE HELPERS
 # -----------------------------------------

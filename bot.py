@@ -745,7 +745,7 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
         f"🗓️ Messages Today: **{daily_count}**\n"
         f"👑 Crowned: **{win_count}**\n"
         f"⚡ Powers Used: **{total_casted}**\n"
-        f"# ⚡️ Royal Powers\n"
+        f"## ⚡️ Royal Powers\n"
         f"-# 🙊 Mime: **{mime_casted} | {mimed_on}**\n"
         f"-# 🤡 Jester: **{jester_casted} | {jestered_on}**\n"
         f"-# 🔮 Curse: **{curse_casted} | {cursed_on}**"

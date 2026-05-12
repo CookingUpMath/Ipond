@@ -685,25 +685,23 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
 
     await ensure_db()
 
-    # Fetch daily messages
+    # Daily messages
     async with pool.acquire() as conn:
         daily = await conn.fetchrow("""
             SELECT count FROM message_counts
             WHERE guild_id = $1 AND user_id = $2
         """, guild_id, user_id)
-
     daily_count = daily["count"] if daily else 0
 
-    # Fetch all-time wins
+    # All-time wins
     async with pool.acquire() as conn:
         wins = await conn.fetchrow("""
             SELECT wins FROM all_time_wins
             WHERE guild_id = $1 AND user_id = $2
         """, guild_id, user_id)
-
     win_count = wins["wins"] if wins else 0
 
-    # Fetch crown uses
+    # Crown powers casted BY user
     async with pool.acquire() as conn:
         uses = await conn.fetchrow("""
             SELECT curse_used, mime_used, jester_used
@@ -711,13 +709,11 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
             WHERE guild_id = $1 AND user_id = $2
         """, guild_id, user_id)
 
-    curse_used = uses["curse_used"] if uses else 0
-    mime_used = uses["mime_used"] if uses else 0
-    jester_used = uses["jester_used"] if uses else 0
+    curse_casted = uses["curse_used"] if uses else 0
+    mime_casted = uses["mime_used"] if uses else 0
+    jester_casted = uses["jester_used"] if uses else 0
 
-    total_powers = curse_used + mime_used + jester_used
-
-    # Fetch victim stats
+    # Victim stats (used ON user)
     async with pool.acquire() as conn:
         victim = await conn.fetchrow("""
             SELECT cursed, mimed, jestered
@@ -725,25 +721,53 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
             WHERE guild_id = $1 AND user_id = $2
         """, guild_id, user_id)
 
-    cursed = victim["cursed"] if victim else 0
-    mimed = victim["mimed"] if victim else 0
-    jestered = victim["jestered"] if victim else 0
+    cursed_on = victim["cursed"] if victim else 0
+    mimed_on = victim["mimed"] if victim else 0
+    jestered_on = victim["jestered"] if victim else 0
 
-    # Build embed
-    embed = discord.Embed(color=discord.Color.gold())
-    embed.set_author(name=f"{user.display_name}'s Stats", icon_url=user.display_avatar.url)
+    # Totals
+    total_casted = curse_casted + mime_casted + jester_casted
 
+    # -----------------------------------------
+    # BUILD EMBED
+    # -----------------------------------------
+
+    embed = discord.Embed(color=discord.Color.blurple())
+    embed.set_thumbnail(url=user.display_avatar.url)
+
+    # Header
     embed.description = (
-        "# 📊 Shaun's Stats\n"
-        f"🗓️ Today: **{daily_count}**\n"
+        f"# 🗯️ {user.display_name}'s Stats\n"
+        f"🗓️ Messages Today: **{daily_count}**\n"
         f"👑 Crowned: **{win_count}**\n"
-        f"⚡ Powers: **{total_powers}**\n"
-        f"-# 🙊 Mimed: **{mimed}**\n"
-        f"-# 🤡 Jestered: **{jestered}**\n"
-        f"-# 🔮 Cursed: **{cursed}**"
+        f"⚡ Powers Used: **{total_casted}**\n\n"
+        f"# 👑 Royal Stats"
+    )
+
+    # FIELD 1 — CASTED
+    embed.add_field(
+        name="⚡ Casted",
+        value=(
+            f"🙊 Mime: **{mime_casted}**\n"
+            f"🤡 Jester: **{jester_casted}**\n"
+            f"🔮 Curse: **{curse_casted}**"
+        ),
+        inline=True
+    )
+
+    # FIELD 2 — RECEIVED
+    embed.add_field(
+        name="🎯 Received",
+        value=(
+            f"🙊 Mime: **{mimed_on}**\n"
+            f"🤡 Jester: **{jestered_on}**\n"
+            f"🔮 Curse: **{cursed_on}**"
+        ),
+        inline=True
     )
 
     await interaction.response.send_message(embed=embed)
+
 
 
 # -----------------------------------------

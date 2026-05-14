@@ -473,6 +473,66 @@ async def on_ready():
 
     print(f"Bot is online as {bot.user}")
 
+# -----------------------------------------
+# NEW ACCOUNT AUTO-KICK (DM → Kick)
+# -----------------------------------------
+
+import discord
+from datetime import datetime, timezone, timedelta
+
+MIN_ACCOUNT_AGE_HOURS = 24
+REJOIN_INVITE = "https://discord.gg/BqYVrX8rPK"  # your invite
+
+async def handle_new_account(member: discord.Member):
+    """Checks account age, DMs user with button, then kicks if too new."""
+    account_age = datetime.now(timezone.utc) - member.createdAt
+    hours_old = account_age.total_seconds() / 3600
+
+    if hours_old >= MIN_ACCOUNT_AGE_HOURS:
+        return  # Account is old enough
+
+    # Build DM embed
+    embed = discord.Embed(
+        title="⏳ Your Discord Account Is Too New",
+        description=(
+            f"Hey **{member.name}**, thanks for trying to join **Ducky**!\n\n"
+            f"Your Discord account is currently **too new** to join.\n"
+            f"Please wait **24 hours** from when your account was created.\n\n"
+            f"You can rejoin later using the button below."
+        ),
+        color=0xffcc00
+    )
+
+    # Button view
+    class RejoinButton(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=None)
+            self.add_item(
+                discord.ui.Button(
+                    label="Rejoin Ducky",
+                    url=REJOIN_INVITE,
+                    style=discord.ButtonStyle.link
+                )
+            )
+
+    # Try to DM the user
+    try:
+        await member.send(embed=embed, view=RejoinButton())
+    except:
+        pass  # DMs closed
+
+    # Kick the user
+    try:
+        await member.kick(reason="Account too new (under 24 hours)")
+    except Exception as e:
+        print(f"Kick failed: {e}")
+
+
+@bot.event
+async def on_member_join(member):
+    """Runs when someone joins the server."""
+    await handle_new_account(member)
+
 
 # -----------------------------------------
 # ON MESSAGE — COUNT + EFFECTS

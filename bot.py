@@ -485,7 +485,7 @@ REJOIN_INVITE = "https://discord.gg/BqYVrX8rPK"  # your invite
 
 async def handle_new_account(member: discord.Member):
     """Checks account age, DMs user with button, then kicks if too new."""
-    account_age = datetime.now(timezone.utc) - member.createdAt
+    account_age = datetime.now(timezone.utc) - member.created_at
     hours_old = account_age.total_seconds() / 3600
 
     if hours_old >= MIN_ACCOUNT_AGE_HOURS:

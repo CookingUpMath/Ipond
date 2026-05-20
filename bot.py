@@ -545,7 +545,7 @@ async def on_member_join(member):
 # ---------------------------------------------------------
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from discord.ext import commands
 
 # Track new members only (from this point forward)
@@ -560,11 +560,12 @@ DEFAULT_INACTIVE_ENABLED = False  # System OFF by default
 
 
 # ---------------------------------------------------------
-# DATABASE HELPERS
+# DATABASE HELPERS (POOL VERSION)
 # ---------------------------------------------------------
 
 async def get_inactive_settings(guild_id):
-    record = await db.fetchrow("""
+    global pool
+    record = await pool.fetchrow("""
         SELECT inactive_minutes, inactive_bypass_role, inactive_enabled
         FROM guild_settings
         WHERE guild_id = $1
@@ -578,7 +579,7 @@ async def get_inactive_settings(guild_id):
         )
 
     # Create default row if missing
-    await db.execute("""
+    await pool.execute("""
         INSERT INTO guild_settings (guild_id, inactive_minutes, inactive_bypass_role, inactive_enabled)
         VALUES ($1, $2, $3, $4)
     """, guild_id, DEFAULT_INACTIVE_MINUTES, DEFAULT_BYPASS_ROLE, DEFAULT_INACTIVE_ENABLED)
@@ -587,7 +588,8 @@ async def get_inactive_settings(guild_id):
 
 
 async def set_inactive_minutes(guild_id, minutes):
-    await db.execute("""
+    global pool
+    await pool.execute("""
         UPDATE guild_settings
         SET inactive_minutes = $1
         WHERE guild_id = $2
@@ -595,7 +597,8 @@ async def set_inactive_minutes(guild_id, minutes):
 
 
 async def set_inactive_bypass_role(guild_id, role_id):
-    await db.execute("""
+    global pool
+    await pool.execute("""
         UPDATE guild_settings
         SET inactive_bypass_role = $1
         WHERE guild_id = $2
@@ -603,7 +606,8 @@ async def set_inactive_bypass_role(guild_id, role_id):
 
 
 async def set_inactive_enabled(guild_id, enabled: bool):
-    await db.execute("""
+    global pool
+    await pool.execute("""
         UPDATE guild_settings
         SET inactive_enabled = $1
         WHERE guild_id = $2
@@ -762,7 +766,6 @@ async def inactive_member_kick_task():
                 dm_warning_sent.pop(member_id, None)
 
         await asyncio.sleep(600)
-
 
 
 # -----------------------------------------

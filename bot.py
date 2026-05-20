@@ -471,10 +471,11 @@ async def on_ready():
     if not daily_reset_loop.is_running():
         daily_reset_loop.start()
 
-    # Start inactive kick system safely
+    # Start inactive kick system safely (AFTER DB is ready)
     asyncio.create_task(inactive_member_kick_task())
 
     print(f"Bot is online as {bot.user}")
+
 
 
 # -----------------------------------------

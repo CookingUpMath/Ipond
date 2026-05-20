@@ -533,6 +533,233 @@ async def on_member_join(member):
     """Runs when someone joins the server."""
     await handle_new_account(member)
 
+# ---------------------------------------------------------
+# INACTIVE NEW MEMBER AUTO-KICK SYSTEM
+# (ADMIN ONLY + H:M TIMER + BYPASS ROLE + DM WARNING + TOGGLE)
+# ---------------------------------------------------------
+
+from datetime import datetime, timedelta, timezone
+from discord.ext import commands
+
+# Track new members only (from this point forward)
+new_member_joins = {}
+new_member_activity = {}
+dm_warning_sent = {}
+
+# Defaults
+DEFAULT_INACTIVE_MINUTES = 24 * 60
+DEFAULT_BYPASS_ROLE = None
+DEFAULT_INACTIVE_ENABLED = False  # System OFF by default
+
+
+# ---------------------------------------------------------
+# DATABASE HELPERS
+# ---------------------------------------------------------
+
+async def get_inactive_settings(guild_id):
+    record = await db.fetchrow("""
+        SELECT inactive_minutes, inactive_bypass_role, inactive_enabled
+        FROM guild_settings
+        WHERE guild_id = $1
+    """, guild_id)
+
+    if record:
+        return (
+            record["inactive_minutes"] or DEFAULT_INACTIVE_MINUTES,
+            record["inactive_bypass_role"] or DEFAULT_BYPASS_ROLE,
+            record["inactive_enabled"] if record["inactive_enabled"] is not None else DEFAULT_INACTIVE_ENABLED
+        )
+
+    # Create default row if missing
+    await db.execute("""
+        INSERT INTO guild_settings (guild_id, inactive_minutes, inactive_bypass_role, inactive_enabled)
+        VALUES ($1, $2, $3, $4)
+    """, guild_id, DEFAULT_INACTIVE_MINUTES, DEFAULT_BYPASS_ROLE, DEFAULT_INACTIVE_ENABLED)
+
+    return DEFAULT_INACTIVE_MINUTES, DEFAULT_BYPASS_ROLE, DEFAULT_INACTIVE_ENABLED
+
+
+async def set_inactive_minutes(guild_id, minutes):
+    await db.execute("""
+        UPDATE guild_settings
+        SET inactive_minutes = $1
+        WHERE guild_id = $2
+    """, minutes, guild_id)
+
+
+async def set_inactive_bypass_role(guild_id, role_id):
+    await db.execute("""
+        UPDATE guild_settings
+        SET inactive_bypass_role = $1
+        WHERE guild_id = $2
+    """, role_id, guild_id)
+
+
+async def set_inactive_enabled(guild_id, enabled: bool):
+    await db.execute("""
+        UPDATE guild_settings
+        SET inactive_enabled = $1
+        WHERE guild_id = $2
+    """, enabled, guild_id)
+
+
+# ---------------------------------------------------------
+# SLASH COMMANDS (ADMIN ONLY)
+# ---------------------------------------------------------
+
+@bot.tree.command(
+    name="setinactivetimer",
+    description="Set how long a new member has to speak before being kicked (hours + minutes)."
+)
+@commands.has_permissions(administrator=True)
+@app_commands.describe(
+    hours="Hours before kicking inactive new members",
+    minutes="Minutes before kicking inactive new members"
+)
+async def set_inactive_timer(interaction: discord.Interaction, hours: int, minutes: int):
+    if hours < 0 or minutes < 0:
+        return await interaction.response.send_message("Hours and minutes must be positive.", ephemeral=True)
+
+    if minutes >= 60:
+        return await interaction.response.send_message("Minutes must be between 0 and 59.", ephemeral=True)
+
+    total_minutes = hours * 60 + minutes
+
+    if total_minutes < 1:
+        return await interaction.response.send_message("Timer must be at least 1 minute.", ephemeral=True)
+
+    await set_inactive_minutes(interaction.guild.id, total_minutes)
+    await interaction.response.send_message(
+        f"Inactive kick timer set to **{hours}h {minutes}m**."
+    )
+
+
+@bot.tree.command(
+    name="setinactivebypass",
+    description="Set a role that bypasses the inactive auto-kick."
+)
+@commands.has_permissions(administrator=True)
+@app_commands.describe(role="Role that should bypass the inactive kick system")
+async def set_inactive_bypass(interaction: discord.Interaction, role: discord.Role):
+    await set_inactive_bypass_role(interaction.guild.id, role.id)
+    await interaction.response.send_message(f"Bypass role set to **{role.name}**.")
+
+
+@bot.tree.command(
+    name="setkicker",
+    description="Enable or disable the inactive member auto-kick system."
+)
+@commands.has_permissions(administrator=True)
+@app_commands.describe(state="Choose 'on' or 'off'")
+async def set_kicker(interaction: discord.Interaction, state: str):
+    state = state.lower()
+
+    if state not in ["on", "off"]:
+        return await interaction.response.send_message("Use **on** or **off**.", ephemeral=True)
+
+    enabled = (state == "on")
+    await set_inactive_enabled(interaction.guild.id, enabled)
+
+    await interaction.response.send_message(
+        f"Inactive kick system is now **{'ENABLED' if enabled else 'DISABLED'}**."
+    )
+
+
+# ---------------------------------------------------------
+# TRACKING JOIN + ACTIVITY
+# ---------------------------------------------------------
+
+@bot.event
+async def on_member_join(member):
+    now = datetime.now(timezone.utc)
+    new_member_joins[member.id] = now
+    new_member_activity[member.id] = False
+    dm_warning_sent[member.id] = False
+
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    member_id = message.author.id
+
+    if member_id in new_member_activity and new_member_activity[member_id] is False:
+        new_member_activity[member_id] = True
+
+    await bot.process_commands(message)
+
+
+# ---------------------------------------------------------
+# BACKGROUND CHECK LOOP (WITH DM WARNING + TOGGLE)
+# ---------------------------------------------------------
+
+async def inactive_member_kick_task():
+    await bot.wait_until_ready()
+
+    while not bot.is_closed():
+        guild = bot.guilds[0]
+        now = datetime.now(timezone.utc)
+
+        inactive_minutes, bypass_role_id, inactive_enabled = await get_inactive_settings(guild.id)
+
+        # If system is OFF → skip everything
+        if not inactive_enabled:
+            await asyncio.sleep(600)
+            continue
+
+        warning_time = inactive_minutes - 20  # DM warning 20 minutes before kick
+
+        for member_id, join_time in list(new_member_joins.items()):
+            # Already active → skip
+            if new_member_activity.get(member_id, True):
+                continue
+
+            member = guild.get_member(member_id)
+            if not member:
+                continue
+
+            # Bypass role → skip
+            if bypass_role_id and discord.utils.get(member.roles, id=bypass_role_id):
+                continue
+
+            minutes_since_join = (now - join_time).total_seconds() / 60
+
+            # DM warning
+            if inactive_minutes >= 30:
+                if minutes_since_join >= warning_time and not dm_warning_sent.get(member_id, False):
+                    try:
+                        await member.send(
+                            f"# {guild.name} Ice Breaker\n"
+                            f"Our bot kicks accounts in **{inactive_minutes} minutes** if they do not type 1 message in any server channel. "
+                            f"If you would like to stay, make sure to send a message!\n\n"
+                            "<#1505314716816375979> - Introduce yourself\n"
+                            "<#1406411669785280593> - Start up a random topic\n"
+                            "<#1055252004479443000> - Play with our bots\n\n"
+                            "-# Hope to see you around ❤️"
+                        )
+                    except:
+                        pass
+
+                    dm_warning_sent[member_id] = True
+
+            # Kick
+            if minutes_since_join >= inactive_minutes:
+                try:
+                    await member.kick(reason=f"Inactive for {inactive_minutes} minutes after joining")
+                except Exception as e:
+                    print(f"Kick failed for {member_id}: {e}")
+
+                new_member_joins.pop(member_id, None)
+                new_member_activity.pop(member_id, None)
+                dm_warning_sent.pop(member_id, None)
+
+        await asyncio.sleep(600)
+
+
+bot.loop.create_task(inactive_member_kick_task())
+
+
 
 # -----------------------------------------
 # ON MESSAGE — COUNT + EFFECTS

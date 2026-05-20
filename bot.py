@@ -538,6 +538,7 @@ async def on_member_join(member):
 # (ADMIN ONLY + H:M TIMER + BYPASS ROLE + DM WARNING + TOGGLE)
 # ---------------------------------------------------------
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from discord.ext import commands
 
@@ -697,7 +698,7 @@ async def on_message(message):
 async def inactive_member_kick_task():
     await bot.wait_until_ready()
 
-    while not bot.is_closed():
+    while True:
         guild = bot.guilds[0]
         now = datetime.now(timezone.utc)
 
@@ -757,7 +758,8 @@ async def inactive_member_kick_task():
         await asyncio.sleep(600)
 
 
-bot.loop.create_task(inactive_member_kick_task())
+# Start background task (modern syntax)
+asyncio.create_task(inactive_member_kick_task())
 
 
 

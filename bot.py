@@ -471,7 +471,11 @@ async def on_ready():
     if not daily_reset_loop.is_running():
         daily_reset_loop.start()
 
+    # Start inactive kick system safely
+    asyncio.create_task(inactive_member_kick_task())
+
     print(f"Bot is online as {bot.user}")
+
 
 # -----------------------------------------
 # NEW ACCOUNT AUTO-KICK (DM → Kick)
@@ -756,10 +760,6 @@ async def inactive_member_kick_task():
                 dm_warning_sent.pop(member_id, None)
 
         await asyncio.sleep(600)
-
-
-# Start background task (modern syntax)
-asyncio.create_task(inactive_member_kick_task())
 
 
 

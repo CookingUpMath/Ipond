@@ -674,7 +674,6 @@ async def kicker_loop():
                 if not speak_enabled:
                     continue
 
-                global pool
                 last_msg = await pool.fetchrow("""
                     SELECT last_message
                     FROM message_counts

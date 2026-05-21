@@ -621,9 +621,10 @@ async def toggle_kicker(interaction: discord.Interaction, state: str):
 # ---------------------------------------------------------
 
 async def kicker_loop():
-    await bot.wait_until_ready()
-     # Wait for database pool to be ready
     global pool
+    await bot.wait_until_ready()
+
+    # Wait for database pool to be ready
     while pool is None:
         print("Waiting for database pool...")
         await asyncio.sleep(1)

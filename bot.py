@@ -703,7 +703,8 @@ async def kicker_loop():
                     continue
 
                 join_time = join_row["join_time"]
-                minutes_since_join = (now - join_time).total_seconds() / 60
+                minutes_since_join = (now - join_time.replace(tzinfo=timezone.utc)).total_seconds() / 60
+
 
                 # Fetch last message timestamp
                 last_msg = await pool.fetchrow("""

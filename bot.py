@@ -551,6 +551,23 @@ async def set_kicker_bypass_role(guild_id: int, role_id: int | None):
         WHERE guild_id = $2
     """, role_id, guild_id)
 
+# ---------------------------------------------------------
+# MEMBER JOIN HANDLER (NEW)
+# ---------------------------------------------------------
+
+@bot.event
+async def on_member_join(member):
+    if member.bot:
+        return
+
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO join_tracking (user_id, guild_id, join_time)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (user_id, guild_id) DO NOTHING;
+        """, member.id, member.guild.id)
+
+
 
 # ---------------------------------------------------------
 # SLASH COMMANDS (SPEAK-TO-STAY ONLY)
@@ -628,7 +645,7 @@ async def kicker_loop():
     while pool is None:
         print("Waiting for database pool...")
         await asyncio.sleep(1)
-   
+
     while True:
         now = datetime.now(timezone.utc)
 
@@ -674,27 +691,51 @@ async def kicker_loop():
                 if not speak_enabled:
                     continue
 
+                # Fetch join time from DB
+                join_row = await pool.fetchrow("""
+                    SELECT join_time
+                    FROM join_tracking
+                    WHERE user_id = $1 AND guild_id = $2
+                """, member.id, guild.id)
+
+                # If no join record → they joined before system was enabled OR already spoke
+                if not join_row:
+                    continue
+
+                join_time = join_row["join_time"]
+                minutes_since_join = (now - join_time).total_seconds() / 60
+
+                # Fetch last message timestamp
                 last_msg = await pool.fetchrow("""
                     SELECT last_message
                     FROM message_counts
                     WHERE user_id = $1 AND guild_id = $2
                 """, member.id, guild.id)
 
-                if not last_msg or not last_msg["last_message"]:
-                    minutes_since_msg = speak_minutes + 1
-                else:
-                    last_time = last_msg["last_message"]
-                    if last_time.tzinfo is None:
-                        last_time = last_time.replace(tzinfo=timezone.utc)
-                    minutes_since_msg = (now - last_time).total_seconds() / 60
+                # If they HAVE spoken → remove join tracking and skip
+                if last_msg and last_msg["last_message"]:
+                    await pool.execute("""
+                        DELETE FROM join_tracking
+                        WHERE user_id = $1 AND guild_id = $2
+                    """, member.id, guild.id)
+                    continue
 
-                if minutes_since_msg >= speak_minutes:
+                # They have NOT spoken — check join timer
+                if minutes_since_join >= speak_minutes:
                     try:
                         await member.kick(reason=f"Inactive for {speak_minutes} minutes (speak-to-stay)")
                     except Exception as e:
                         print(f"Speak-to-stay kick failed for {member.id}: {e}")
 
+                    # Remove from join tracking after kick
+                    await pool.execute("""
+                        DELETE FROM join_tracking
+                        WHERE user_id = $1 AND guild_id = $2
+                    """, member.id, guild.id)
+
+        # Loop delay
         await asyncio.sleep(600)
+
 
 
 
@@ -711,15 +752,26 @@ async def on_message(message: discord.Message):
     if guild is None:
         return
 
+    # ---------------------------------------------------------
+    # NEW: Remove join-tracking entry when user speaks
+    # ---------------------------------------------------------
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            DELETE FROM join_tracking
+            WHERE user_id = $1 AND guild_id = $2;
+        """, message.author.id, guild.id)
+
+    # (your existing code continues unchanged)
     settings = await get_guild_settings(guild.id)
 
-    await increment_message_count(guild.id, message.author.id)
+    await increment_message_count(guild.id, message)
 
     await ensure_db()
     async with pool.acquire() as conn:
         effect = await conn.fetchrow("""
             SELECT * FROM active_effects WHERE guild_id = $1
         """, guild.id)
+
 
     now_utc = datetime.utcnow()
 

@@ -764,7 +764,8 @@ async def on_message(message: discord.Message):
     # (your existing code continues unchanged)
     settings = await get_guild_settings(guild.id)
 
-    await increment_message_count(guild.id, message)
+    await increment_message_count(guild.id, message.author.id)
+
 
     await ensure_db()
     async with pool.acquire() as conn:

@@ -1628,64 +1628,50 @@ TARGET_EMOJI_ID = 1295255068483784786
 
 @bot.event
 async def on_reaction_add(reaction, user):
-    try:
-        if user.bot:
-            return
+    if user.bot:
+        return
 
-        emoji = reaction.emoji
-        if (
-            getattr(emoji, "name", None) != TARGET_EMOJI_NAME
-            and getattr(emoji, "id", None) != TARGET_EMOJI_ID
-        ):
-            return
+    emoji = reaction.emoji
+    if (
+        getattr(emoji, "name", None) != TARGET_EMOJI_NAME
+        and getattr(emoji, "id", None) != TARGET_EMOJI_ID
+    ):
+        return
 
-        total = await db.get("d_zlove_total") or 0
-        total += 1
-        await db.set("d_zlove_total", total)
-
-    except Exception as e:
-        print("ReactionAdd error:", e)
+    total = await db.get("d_zlove_total") or 0
+    await db.set("d_zlove_total", total + 1)
 
 
 @bot.event
 async def on_reaction_remove(reaction, user):
-    try:
-        if user.bot:
-            return
+    if user.bot:
+        return
 
-        emoji = reaction.emoji
-        if (
-            getattr(emoji, "name", None) != TARGET_EMOJI_NAME
-            and getattr(emoji, "id", None) != TARGET_EMOJI_ID
-        ):
-            return
+    emoji = reaction.emoji
+    if (
+        getattr(emoji, "name", None) != TARGET_EMOJI_NAME
+        and getattr(emoji, "id", None) != TARGET_EMOJI_ID
+    ):
+        return
 
-        total = await db.get("d_zlove_total") or 0
-        total = max(0, total - 1)
-        await db.set("d_zlove_total", total)
-
-    except Exception as e:
-        print("ReactionRemove error:", e)
+    total = await db.get("d_zlove_total") or 0
+    await db.set("d_zlove_total", max(0, total - 1))
 
 
 async def update_love_channel():
     await bot.wait_until_ready()
     channel = bot.get_channel(TARGET_CHANNEL_ID)
 
-    while not bot.is_closed():
-        try:
-            total = await db.get("d_zlove_total") or 0
-            if channel is None:
-                channel = bot.get_channel(TARGET_CHANNEL_ID)
-            if channel is not None:
-                await channel.edit(name=f"❤️: {total}")
-        except Exception as e:
-            print("Channel update error:", e)
-
+    while True:
+        total = await db.get("d_zlove_total") or 0
+        if channel:
+            await channel.edit(name=f"❤️: {total}")
         await asyncio.sleep(300)  # 5 minutes
 
 
-bot.loop.create_task(update_love_channel())
+@bot.event
+async def setup_hook():
+    asyncio.create_task(update_love_channel())
 
 
 # -----------------------------------------

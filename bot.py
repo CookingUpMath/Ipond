@@ -1659,6 +1659,8 @@ async def on_reaction_remove(reaction, user):
 
 
 async def update_love_channel():
+    global db
+
     await bot.wait_until_ready()
     channel = bot.get_channel(TARGET_CHANNEL_ID)
 

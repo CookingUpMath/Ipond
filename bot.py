@@ -1692,7 +1692,12 @@ async def update_love_channel():
 
 @bot.event
 async def setup_hook():
+    # Wait until the database is initialized
+    while pool is None:
+        await asyncio.sleep(0.5)
+
     asyncio.create_task(update_love_channel())
+
 
 
 

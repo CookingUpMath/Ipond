@@ -1615,16 +1615,33 @@ async def settings_cmd(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed)
 
-# ------------------------------
-# ❤️ D_ZLOVE REACTION TRACKER
-# ------------------------------
-
-import asyncio
+# ------------------------------------------------------------
+# ❤️ D_ZLOVE REACTION TRACKER (asyncpg version)
+# ------------------------------------------------------------
 
 TARGET_CHANNEL_ID = 1500998760875167744
 TARGET_EMOJI_NAME = "D_ZLove"
 TARGET_EMOJI_ID = 1295255068483784786
 
+
+# --- Database helpers using YOUR asyncpg pool ---
+
+async def get_love_total():
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT total FROM d_zlove_total WHERE id = 1;")
+        return row["total"] if row else 0
+
+
+async def set_love_total(value: int):
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE d_zlove_total
+            SET total = $1
+            WHERE id = 1;
+        """, value)
+
+
+# --- Reaction add/remove events ---
 
 @bot.event
 async def on_reaction_add(reaction, user):
@@ -1638,8 +1655,8 @@ async def on_reaction_add(reaction, user):
     ):
         return
 
-    total = await db.get("d_zlove_total") or 0
-    await db.set("d_zlove_total", total + 1)
+    total = await get_love_total()
+    await set_love_total(total + 1)
 
 
 @bot.event
@@ -1654,26 +1671,29 @@ async def on_reaction_remove(reaction, user):
     ):
         return
 
-    total = await db.get("d_zlove_total") or 0
-    await db.set("d_zlove_total", max(0, total - 1))
+    total = await get_love_total()
+    await set_love_total(max(0, total - 1))
 
+
+# --- Background updater loop ---
 
 async def update_love_channel():
-    global db
-
     await bot.wait_until_ready()
     channel = bot.get_channel(TARGET_CHANNEL_ID)
 
     while True:
-        total = await db.get("d_zlove_total") or 0
+        total = await get_love_total()
         if channel:
             await channel.edit(name=f"❤️: {total}")
         await asyncio.sleep(300)  # 5 minutes
 
 
+# --- Proper scheduling for Python 3.13 / discord.py 2.3+ ---
+
 @bot.event
 async def setup_hook():
     asyncio.create_task(update_love_channel())
+
 
 
 # -----------------------------------------

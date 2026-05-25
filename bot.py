@@ -1,10 +1,12 @@
+import os
+import random
+import asyncio
+from datetime import datetime, timedelta, timezone
+
+import asyncpg
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-import asyncpg
-import os
-import random
-from datetime import datetime, timedelta
 import pytz
 import emoji
 
@@ -49,18 +51,28 @@ async def init_db():
             reset_hour INT DEFAULT 0,
             reset_minute INT DEFAULT 0,
             current_champion_id BIGINT,
-            last_reset_date DATE
+            last_reset_date DATE,
+            speak_minutes INT DEFAULT 20160,
+            speak_enabled BOOLEAN DEFAULT FALSE,
+            kicker_bypass_role BIGINT
         );
         """)
 
-        # Daily message counts
+        # Daily message counts (now with last_message)
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS message_counts (
             guild_id BIGINT,
             user_id BIGINT,
             count BIGINT DEFAULT 0,
+            last_message TIMESTAMP,
             PRIMARY KEY (guild_id, user_id)
         );
+        """)
+
+        # Ensure last_message exists even if table pre-existed
+        await conn.execute("""
+        ALTER TABLE message_counts
+        ADD COLUMN IF NOT EXISTS last_message TIMESTAMP;
         """)
 
         # All-time wins
@@ -130,6 +142,31 @@ async def init_db():
         );
         """)
 
+        # Join tracking for speak-to-stay
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS join_tracking (
+            user_id BIGINT,
+            guild_id BIGINT,
+            join_time TIMESTAMP,
+            PRIMARY KEY (user_id, guild_id)
+        );
+        """)
+
+        # D_ZLove total tracker
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS d_zlove_total (
+            id INT PRIMARY KEY,
+            total BIGINT DEFAULT 0
+        );
+        """)
+
+        # Ensure a single row exists
+        await conn.execute("""
+        INSERT INTO d_zlove_total (id, total)
+        VALUES (1, 0)
+        ON CONFLICT (id) DO NOTHING;
+        """)
+
     print("Database initialized and tables ensured.")
 
 
@@ -162,7 +199,10 @@ async def get_guild_settings(guild_id: int):
                 "reset_hour": 0,
                 "reset_minute": 0,
                 "current_champion_id": None,
-                "last_reset_date": None
+                "last_reset_date": None,
+                "speak_minutes": 20160,
+                "speak_enabled": False,
+                "kicker_bypass_role": None
             }
 
         return dict(row)
@@ -178,7 +218,6 @@ def get_tz(settings: dict):
 def clean_display_name(name: str) -> str:
     return name.replace(" 🤡", "").replace("🤡", "").strip()
 
-
 # -----------------------------------------
 # MESSAGE + STATS HELPERS
 # -----------------------------------------
@@ -187,10 +226,12 @@ async def increment_message_count(guild_id: int, user_id: int):
     await ensure_db()
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO message_counts (guild_id, user_id, count)
-            VALUES ($1, $2, 1)
+            INSERT INTO message_counts (guild_id, user_id, count, last_message)
+            VALUES ($1, $2, 1, NOW())
             ON CONFLICT (guild_id, user_id)
-            DO UPDATE SET count = message_counts.count + 1
+            DO UPDATE SET
+                count = message_counts.count + 1,
+                last_message = NOW()
         """, guild_id, user_id)
 
 
@@ -454,428 +495,6 @@ async def daily_reset_loop():
 
 
 # -----------------------------------------
-# /forcesync + on_ready
-# -----------------------------------------
-
-@tree.command(name="forcesync", description="Force sync slash commands.")
-async def forcesync(interaction: discord.Interaction):
-    await tree.sync()
-    await interaction.response.send_message("Slash commands synced.")
-
-@bot.event
-async def on_ready():
-    await init_db()
-    await tree.sync()
-
-    if not daily_reset_loop.is_running():
-        daily_reset_loop.start()
-
-    asyncio.create_task(kicker_loop())
-
-    print(f"Bot is online as {bot.user}")
-
-
-
-# ---------------------------------------------------------
-# 24H ACCOUNT-AGE KICKER + SPEAK-TO-STAY SYSTEM
-# ---------------------------------------------------------
-
-import asyncio
-from datetime import datetime, timezone
-from discord.ext import commands
-
-ACCOUNT_AGE_LIMIT_MINUTES = 24 * 60  # 24 hours
-
-
-# ---------------------------------------------------------
-# DATABASE HELPERS (POOL VERSION)
-# ---------------------------------------------------------
-
-async def ensure_kicker_columns(guild_id: int):
-    global pool
-
-    await pool.execute("""
-        ALTER TABLE guild_settings
-        ADD COLUMN IF NOT EXISTS speak_minutes INT DEFAULT 20160,
-        ADD COLUMN IF NOT EXISTS speak_enabled BOOLEAN DEFAULT FALSE,
-        ADD COLUMN IF NOT EXISTS kicker_bypass_role BIGINT;
-    """)
-
-    await pool.execute("""
-        INSERT INTO guild_settings (guild_id)
-        VALUES ($1)
-        ON CONFLICT (guild_id) DO NOTHING;
-    """, guild_id)
-
-
-async def get_kicker_settings(guild_id: int):
-    global pool
-    await ensure_kicker_columns(guild_id)
-
-    row = await pool.fetchrow("""
-        SELECT speak_minutes, speak_enabled, kicker_bypass_role
-        FROM guild_settings
-        WHERE guild_id = $1
-    """, guild_id)
-
-    return {
-        "speak_minutes": row["speak_minutes"],
-        "speak_enabled": row["speak_enabled"],
-        "bypass_role": row["kicker_bypass_role"],
-    }
-
-
-async def set_speak_minutes(guild_id: int, minutes: int):
-    global pool
-    await pool.execute("""
-        UPDATE guild_settings
-        SET speak_minutes = $1
-        WHERE guild_id = $2
-    """, minutes, guild_id)
-
-
-async def set_speak_enabled(guild_id: int, enabled: bool):
-    global pool
-    await pool.execute("""
-        UPDATE guild_settings
-        SET speak_enabled = $1
-        WHERE guild_id = $2
-    """, enabled, guild_id)
-
-
-async def set_kicker_bypass_role(guild_id: int, role_id: int | None):
-    global pool
-    await pool.execute("""
-        UPDATE guild_settings
-        SET kicker_bypass_role = $1
-        WHERE guild_id = $2
-    """, role_id, guild_id)
-
-# ---------------------------------------------------------
-# MEMBER JOIN HANDLER (NEW)
-# ---------------------------------------------------------
-
-@bot.event
-async def on_member_join(member):
-    if member.bot:
-        return
-
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO join_tracking (user_id, guild_id, join_time)
-            VALUES ($1, $2, NOW())
-            ON CONFLICT (user_id, guild_id) DO NOTHING;
-        """, member.id, member.guild.id)
-
-
-
-# ---------------------------------------------------------
-# SLASH COMMANDS (SPEAK-TO-STAY ONLY)
-# ---------------------------------------------------------
-
-@bot.tree.command(
-    name="setkicktimer",
-    description="Set how long a member can be inactive before being kicked (speak-to-stay)."
-)
-@commands.has_permissions(administrator=True)
-@app_commands.describe(
-    hours="Hours before kicking inactive members",
-    minutes="Minutes before kicking inactive members"
-)
-async def set_kick_timer(interaction: discord.Interaction, hours: int, minutes: int):
-    if hours < 0 or minutes < 0:
-        return await interaction.response.send_message("Hours and minutes must be positive.", ephemeral=True)
-
-    if minutes >= 60:
-        return await interaction.response.send_message("Minutes must be between 0 and 59.", ephemeral=True)
-
-    total_minutes = hours * 60 + minutes
-
-    if total_minutes < 1:
-        return await interaction.response.send_message("Timer must be at least 1 minute.", ephemeral=True)
-
-    await set_speak_minutes(interaction.guild.id, total_minutes)
-    await interaction.response.send_message(
-        f"Speak-to-stay inactivity timer set to **{hours}h {minutes}m**."
-    )
-
-
-@bot.tree.command(
-    name="setkickerbypass",
-    description="Set the shared bypass role for both systems."
-)
-@commands.has_permissions(administrator=True)
-@app_commands.describe(role="Role that should never be kicked by the system")
-async def set_kicker_bypass(interaction: discord.Interaction, role: discord.Role):
-    await set_kicker_bypass_role(interaction.guild.id, role.id)
-    await interaction.response.send_message(
-        f"Bypass role set to **{role.name}** for both systems."
-    )
-
-
-@bot.tree.command(
-    name="togglekicker",
-    description="Enable or disable the speak-to-stay system (24h barrier is always on)."
-)
-@commands.has_permissions(administrator=True)
-@app_commands.describe(state="Use 'on' or 'off'")
-async def toggle_kicker(interaction: discord.Interaction, state: str):
-    state = state.lower()
-    if state not in ["on", "off"]:
-        return await interaction.response.send_message("Use **on** or **off**.", ephemeral=True)
-
-    enabled = (state == "on")
-    await set_speak_enabled(interaction.guild.id, enabled)
-
-    await interaction.response.send_message(
-        f"Speak-to-stay system is now **{'ENABLED' if enabled else 'DISABLED'}**.\n"
-        f"> 24h new-account barrier remains **always ON**."
-    )
-
-
-# ---------------------------------------------------------
-# BACKGROUND LOOP
-# ---------------------------------------------------------
-
-async def kicker_loop():
-    global pool
-    await bot.wait_until_ready()
-
-    # Wait for database pool to be ready
-    while pool is None:
-        print("Waiting for database pool...")
-        await asyncio.sleep(1)
-
-    while True:
-        now = datetime.now(timezone.utc)
-
-        for guild in bot.guilds:
-            settings = await get_kicker_settings(guild.id)
-            bypass_role_id = settings["bypass_role"]
-            speak_enabled = settings["speak_enabled"]
-            speak_minutes = settings["speak_minutes"]
-
-            for member in guild.members:
-                if member.bot:
-                    continue
-
-                # Shared bypass role
-                if bypass_role_id and discord.utils.get(member.roles, id=bypass_role_id):
-                    continue
-
-                # ---------------------------------------------------------
-                # 1) 24H ACCOUNT AGE BARRIER (ALWAYS ON)
-                # ---------------------------------------------------------
-                account_age_minutes = (now - member.created_at.replace(tzinfo=timezone.utc)).total_seconds() / 60
-
-                if account_age_minutes < ACCOUNT_AGE_LIMIT_MINUTES:
-                    try:
-                        invite_text = (
-                            f"Hey! You were kicked from **{guild.name}** because your account is under 24 hours old.\n\n"
-                            f"You’re welcome to rejoin once your account is older:\n"
-                            f"https://discord.gg/YOUR_INVITE_LINK"
-                        )
-                        try:
-                            await member.send(invite_text)
-                        except:
-                            pass
-
-                        await member.kick(reason="Account under 24 hours old (auto barrier)")
-                    except Exception as e:
-                        print(f"24h barrier kick failed for {member.id}: {e}")
-                    continue
-
-                # ---------------------------------------------------------
-                # 2) SPEAK-TO-STAY SYSTEM (ONLY IF ENABLED)
-                # ---------------------------------------------------------
-                if not speak_enabled:
-                    continue
-
-                # Fetch join time from DB
-                join_row = await pool.fetchrow("""
-                    SELECT join_time
-                    FROM join_tracking
-                    WHERE user_id = $1 AND guild_id = $2
-                """, member.id, guild.id)
-
-                # If no join record → they joined before system was enabled OR already spoke
-                if not join_row:
-                    continue
-
-                join_time = join_row["join_time"]
-                minutes_since_join = (now - join_time.replace(tzinfo=timezone.utc)).total_seconds() / 60
-
-
-                # Fetch last message timestamp
-                last_msg = await pool.fetchrow("""
-                    SELECT last_message
-                    FROM message_counts
-                    WHERE user_id = $1 AND guild_id = $2
-                """, member.id, guild.id)
-
-                # If they HAVE spoken → remove join tracking and skip
-                if last_msg and last_msg["last_message"]:
-                    await pool.execute("""
-                        DELETE FROM join_tracking
-                        WHERE user_id = $1 AND guild_id = $2
-                    """, member.id, guild.id)
-                    continue
-
-                # They have NOT spoken — check join timer
-                if minutes_since_join >= speak_minutes:
-                    try:
-                        await member.kick(reason=f"Inactive for {speak_minutes} minutes (speak-to-stay)")
-                    except Exception as e:
-                        print(f"Speak-to-stay kick failed for {member.id}: {e}")
-
-                    # Remove from join tracking after kick
-                    await pool.execute("""
-                        DELETE FROM join_tracking
-                        WHERE user_id = $1 AND guild_id = $2
-                    """, member.id, guild.id)
-
-        # Loop delay
-        await asyncio.sleep(600)
-
-
-
-
-# -----------------------------------------
-# ON MESSAGE — COUNT + EFFECTS
-# -----------------------------------------
-
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot:
-        return
-
-    guild = message.guild
-    if guild is None:
-        return
-
-    # ---------------------------------------------------------
-    # NEW: Remove join-tracking entry when user speaks
-    # ---------------------------------------------------------
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            DELETE FROM join_tracking
-            WHERE user_id = $1 AND guild_id = $2;
-        """, message.author.id, guild.id)
-
-    # (your existing code continues unchanged)
-    settings = await get_guild_settings(guild.id)
-
-    await increment_message_count(guild.id, message.author.id)
-
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        effect = await conn.fetchrow("""
-            SELECT * FROM active_effects WHERE guild_id = $1
-        """, guild.id)
-
-
-    now_utc = datetime.utcnow()
-
-    if effect:
-        cursed_user = effect["cursed_user"]
-        curse_until = effect["curse_until"]
-        mimed_user = effect["mimed_user"]
-        mime_until = effect["mime_until"]
-        jester_user = effect["jester_user"]
-        jester_until = effect["jester_until"]
-
-        update_needed = False
-
-        if curse_until and curse_until < now_utc:
-            cursed_user = None
-            curse_until = None
-            update_needed = True
-
-        if mime_until and mime_until < now_utc:
-            if mimed_user:
-                member = guild.get_member(mimed_user)
-                if member:
-                    try:
-                        await member.send("🙊 You have done well mime. You may now speak!")
-                    except:
-                        pass
-            mimed_user = None
-            mime_until = None
-            update_needed = True
-
-        if jester_until and jester_until < now_utc:
-            if jester_user:
-                member = guild.get_member(jester_user)
-                if member:
-                    try:
-                        new_name = clean_display_name(member.display_name)
-                        if new_name != member.display_name:
-                            await member.edit(nick=new_name)
-                    except:
-                        pass
-            jester_user = None
-            jester_until = None
-            update_needed = True
-
-        if update_needed:
-            await ensure_db()
-            async with pool.acquire() as conn:
-                await conn.execute("""
-                    UPDATE active_effects
-                    SET cursed_user = $2,
-                        curse_until = $3,
-                        mimed_user = $4,
-                        mime_until = $5,
-                        jester_user = $6,
-                        jester_until = $7
-                    WHERE guild_id = $1
-                """, guild.id,
-                   cursed_user, curse_until,
-                   mimed_user, mime_until,
-                   jester_user, jester_until)
-
-        if cursed_user == message.author.id and curse_until and curse_until >= now_utc:
-            if random.random() < 0.20:
-                try:
-                    await message.add_reaction("🦆")
-                except:
-                    pass
-                try:
-                    await message.channel.send("quack")
-                except:
-                    pass
-
-        if mimed_user == message.author.id and mime_until and mime_until >= now_utc:
-            content = message.content
-
-            if content and content.strip():
-                stripped = content.strip()
-
-                def is_emoji_char(c: str) -> bool:
-                    return c in emoji.EMOJI_DATA
-
-                if not all(is_emoji_char(c) or c.isspace() for c in stripped):
-                    try:
-                        await message.delete()
-                    except:
-                        pass
-                    return
-
-            await bot.process_commands(message)
-            return
-
-        if jester_user == message.author.id and jester_until and jester_until >= now_utc:
-            try:
-                if "🤡" not in message.author.display_name:
-                    await message.author.edit(nick=f"{message.author.display_name} 🤡")
-            except:
-                pass
-
-    await bot.process_commands(message)
-
-
-# -----------------------------------------
 # LEADERBOARD
 # -----------------------------------------
 
@@ -948,7 +567,7 @@ async def leaderboard(interaction: discord.Interaction):
     )
 
     await interaction.response.send_message(embed=embed)
-    
+
 # -----------------------------------------
 # /stats — VIEW USER STATS
 # -----------------------------------------
@@ -1005,15 +624,7 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
 
     total_casted = curse_casted + mime_casted + jester_casted
 
-    # -----------------------------------------
-    # COLOR — use user's role color
-    # -----------------------------------------
-
     user_color = user.color if user.color.value != 0 else discord.Color.blurple()
-
-    # -----------------------------------------
-    # BUILD EMBED
-    # -----------------------------------------
 
     embed = discord.Embed(color=user_color)
     embed.set_thumbnail(url=user.display_avatar.url)
@@ -1032,7 +643,6 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
     embed.set_footer(text="⚠️ Stats are Sent | Received")
 
     await interaction.response.send_message(embed=embed)
-
 
 
 # -----------------------------------------
@@ -1242,7 +852,6 @@ async def jester(interaction: discord.Interaction, member: discord.Member):
 
     await interaction.response.send_message(embed=embed)
 
-
 # -----------------------------------------
 # /reseteffects — ADMIN
 # -----------------------------------------
@@ -1367,6 +976,8 @@ async def reseteffects(interaction: discord.Interaction, member: discord.Member 
                 pass
 
     await interaction.response.send_message(f"✅ All effects cleared for {target.mention}.")
+
+
 # -----------------------------------------
 # ADMIN COMMANDS
 # -----------------------------------------
@@ -1588,7 +1199,7 @@ async def setchampion(interaction: discord.Interaction, member: discord.Member):
     await interaction.response.send_message(embed=embed)
 
 
-@tree.command(name="settings", description="View the server's crown system settings.")
+@tree.command(name="settings", description="View the server's crown and kicker settings.")
 async def settings_cmd(interaction: discord.Interaction):
 
     settings = await get_guild_settings(interaction.guild_id)
@@ -1600,7 +1211,12 @@ async def settings_cmd(interaction: discord.Interaction):
         f"<#{settings['champion_vc_id']}>" if settings["champion_vc_id"] else "Not set"
     )
     champion = (
-        f"<@{settings['current_champion_id']}>" if settings["current_champion_id"] else "None"
+        f"<@{settings['current_champion_id']}>" if settings['current_champion_id'] else "None"
+    )
+    speak_state = "Enabled" if settings["speak_enabled"] else "Disabled"
+    speak_minutes = settings["speak_minutes"]
+    bypass_role = (
+        f"<@&{settings['kicker_bypass_role']}>" if settings["kicker_bypass_role"] else "None"
     )
 
     embed = discord.Embed(color=discord.Color.blue())
@@ -1610,13 +1226,403 @@ async def settings_cmd(interaction: discord.Interaction):
         f"-# Champion VC: {vc}\n"
         f"-# Timezone: **{settings['timezone_str']}**\n"
         f"-# Reset Time: **{settings['reset_hour']:02d}:{settings['reset_minute']:02d}**\n"
-        f"-# Current Champion: {champion}"
+        f"-# Current Champion: {champion}\n\n"
+        f"## 🛡️ Kicker System\n"
+        f"-# 24h New-Account Barrier: **Always Enabled**\n"
+        f"-# Speak-to-Stay: **{speak_state}**\n"
+        f"-# Speak Timer: **{speak_minutes} minutes**\n"
+        f"-# Bypass Role: {bypass_role}"
     )
 
     await interaction.response.send_message(embed=embed)
 
+# ---------------------------------------------------------
+# 24H ACCOUNT-AGE KICKER + SPEAK-TO-STAY SYSTEM
+# ---------------------------------------------------------
+
+ACCOUNT_AGE_LIMIT_MINUTES = 24 * 60  # 24 hours
+
+
+# ---------------------------------------------------------
+# KICKER DATABASE HELPERS
+# ---------------------------------------------------------
+
+async def ensure_kicker_columns(guild_id: int):
+    await ensure_db()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            ALTER TABLE guild_settings
+            ADD COLUMN IF NOT EXISTS speak_minutes INT DEFAULT 20160,
+            ADD COLUMN IF NOT EXISTS speak_enabled BOOLEAN DEFAULT FALSE,
+            ADD COLUMN IF NOT EXISTS kicker_bypass_role BIGINT;
+        """)
+
+        await conn.execute("""
+            INSERT INTO guild_settings (guild_id)
+            VALUES ($1)
+            ON CONFLICT (guild_id) DO NOTHING;
+        """, guild_id)
+
+
+async def get_kicker_settings(guild_id: int):
+    await ensure_kicker_columns(guild_id)
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT speak_minutes, speak_enabled, kicker_bypass_role
+            FROM guild_settings
+            WHERE guild_id = $1
+        """, guild_id)
+
+    return {
+        "speak_minutes": row["speak_minutes"],
+        "speak_enabled": row["speak_enabled"],
+        "bypass_role": row["kicker_bypass_role"],
+    }
+
+
+async def set_speak_minutes(guild_id: int, minutes: int):
+    await ensure_db()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE guild_settings
+            SET speak_minutes = $1
+            WHERE guild_id = $2
+        """, minutes, guild_id)
+
+
+async def set_speak_enabled(guild_id: int, enabled: bool):
+    await ensure_db()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE guild_settings
+            SET speak_enabled = $1
+            WHERE guild_id = $2
+        """, enabled, guild_id)
+
+
+async def set_kicker_bypass_role(guild_id: int, role_id: int | None):
+    await ensure_db()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE guild_settings
+            SET kicker_bypass_role = $1
+            WHERE guild_id = $2
+        """, role_id, guild_id)
+
+
+# ---------------------------------------------------------
+# MEMBER JOIN HANDLER
+# ---------------------------------------------------------
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    if member.bot:
+        return
+
+    await ensure_db()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO join_tracking (user_id, guild_id, join_time)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (user_id, guild_id) DO NOTHING;
+        """, member.id, member.guild.id)
+
+
+# ---------------------------------------------------------
+# SLASH COMMANDS (SPEAK-TO-STAY ONLY)
+# ---------------------------------------------------------
+
+@bot.tree.command(
+    name="setkicktimer",
+    description="Set how long a member can be inactive before being kicked (speak-to-stay)."
+)
+@commands.has_permissions(administrator=True)
+@app_commands.describe(
+    hours="Hours before kicking inactive members",
+    minutes="Minutes before kicking inactive members"
+)
+async def set_kick_timer(interaction: discord.Interaction, hours: int, minutes: int):
+    if hours < 0 or minutes < 0:
+        return await interaction.response.send_message("Hours and minutes must be positive.", ephemeral=True)
+
+    if minutes >= 60:
+        return await interaction.response.send_message("Minutes must be between 0 and 59.", ephemeral=True)
+
+    total_minutes = hours * 60 + minutes
+
+    if total_minutes < 1:
+        return await interaction.response.send_message("Timer must be at least 1 minute.", ephemeral=True)
+
+    await set_speak_minutes(interaction.guild.id, total_minutes)
+    await interaction.response.send_message(
+        f"Speak-to-stay inactivity timer set to **{hours}h {minutes}m**."
+    )
+
+
+@bot.tree.command(
+    name="setkickerbypass",
+    description="Set the shared bypass role for both systems."
+)
+@commands.has_permissions(administrator=True)
+@app_commands.describe(role="Role that should never be kicked by the system")
+async def set_kicker_bypass(interaction: discord.Interaction, role: discord.Role):
+    await set_kicker_bypass_role(interaction.guild.id, role.id)
+    await interaction.response.send_message(
+        f"Bypass role set to **{role.name}** for both systems."
+    )
+
+
+@bot.tree.command(
+    name="togglekicker",
+    description="Enable or disable the speak-to-stay system (24h barrier is always on)."
+)
+@commands.has_permissions(administrator=True)
+@app_commands.describe(state="Use 'on' or 'off'")
+async def toggle_kicker(interaction: discord.Interaction, state: str):
+    state = state.lower()
+    if state not in ["on", "off"]:
+        return await interaction.response.send_message("Use **on** or **off**.", ephemeral=True)
+
+    enabled = (state == "on")
+    await set_speak_enabled(interaction.guild.id, enabled)
+
+    await interaction.response.send_message(
+        f"Speak-to-stay system is now **{'ENABLED' if enabled else 'DISABLED'}**.\n"
+        f"> 24h new-account barrier remains **always ON**."
+    )
+
+
+# ---------------------------------------------------------
+# BACKGROUND KICKER LOOP
+# ---------------------------------------------------------
+
+async def kicker_loop():
+    global pool
+    await bot.wait_until_ready()
+
+    while pool is None:
+        print("Waiting for database pool...")
+        await asyncio.sleep(1)
+
+    while True:
+        now = datetime.now(timezone.utc)
+
+        for guild in bot.guilds:
+            settings = await get_kicker_settings(guild.id)
+            bypass_role_id = settings["bypass_role"]
+            speak_enabled = settings["speak_enabled"]
+            speak_minutes = settings["speak_minutes"]
+
+            for member in guild.members:
+                if member.bot:
+                    continue
+
+                # Shared bypass role
+                if bypass_role_id and discord.utils.get(member.roles, id=bypass_role_id):
+                    continue
+
+                # 1) 24H ACCOUNT AGE BARRIER (ALWAYS ON)
+                account_age_minutes = (now - member.created_at.replace(tzinfo=timezone.utc)).total_seconds() / 60
+
+                if account_age_minutes < ACCOUNT_AGE_LIMIT_MINUTES:
+                    try:
+                        invite_text = (
+                            f"Hey! You were kicked from **{guild.name}** because your account is under 24 hours old.\n\n"
+                            f"You’re welcome to rejoin once your account is older:\n"
+                            f"https://discord.gg/YOUR_INVITE_LINK"
+                        )
+                        try:
+                            await member.send(invite_text)
+                        except:
+                            pass
+
+                        await member.kick(reason="Account under 24 hours old (auto barrier)")
+                    except Exception as e:
+                        print(f"24h barrier kick failed for {member.id}: {e}")
+                    continue
+
+                # 2) SPEAK-TO-STAY SYSTEM (ONLY IF ENABLED)
+                if not speak_enabled:
+                    continue
+
+                # Fetch join time from DB
+                join_row = await pool.fetchrow("""
+                    SELECT join_time
+                    FROM join_tracking
+                    WHERE user_id = $1 AND guild_id = $2
+                """, member.id, guild.id)
+
+                # If no join record → they joined before system was enabled OR already spoke
+                if not join_row:
+                    continue
+
+                join_time = join_row["join_time"]
+                minutes_since_join = (now - join_time.replace(tzinfo=timezone.utc)).total_seconds() / 60
+
+                # Fetch last message timestamp
+                last_msg = await pool.fetchrow("""
+                    SELECT last_message
+                    FROM message_counts
+                    WHERE user_id = $1 AND guild_id = $2
+                """, member.id, guild.id)
+
+                # If they HAVE spoken → remove join tracking and skip
+                if last_msg and last_msg["last_message"]:
+                    await pool.execute("""
+                        DELETE FROM join_tracking
+                        WHERE user_id = $1 AND guild_id = $2
+                    """, member.id, guild.id)
+                    continue
+
+                # They have NOT spoken — check join timer
+                if minutes_since_join >= speak_minutes:
+                    try:
+                        await member.kick(reason=f"Inactive for {speak_minutes} minutes (speak-to-stay)")
+                    except Exception as e:
+                        print(f"Speak-to-stay kick failed for {member.id}: {e}")
+
+                    # Remove from join tracking after kick
+                    await pool.execute("""
+                        DELETE FROM join_tracking
+                        WHERE user_id = $1 AND guild_id = $2
+                    """, member.id, guild.id)
+
+        await asyncio.sleep(600)
+
+# -----------------------------------------
+# ON MESSAGE — COUNT + EFFECTS + JOIN CLEAR
+# -----------------------------------------
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+
+    guild = message.guild
+    if guild is None:
+        return
+
+    await ensure_db()
+
+    # Remove join-tracking entry when user speaks
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            DELETE FROM join_tracking
+            WHERE user_id = $1 AND guild_id = $2;
+        """, message.author.id, guild.id)
+
+    settings = await get_guild_settings(guild.id)
+
+    await increment_message_count(guild.id, message.author.id)
+
+    async with pool.acquire() as conn:
+        effect = await conn.fetchrow("""
+            SELECT * FROM active_effects WHERE guild_id = $1
+        """, guild.id)
+
+    now_utc = datetime.utcnow()
+
+    if effect:
+        cursed_user = effect["cursed_user"]
+        curse_until = effect["curse_until"]
+        mimed_user = effect["mimed_user"]
+        mime_until = effect["mime_until"]
+        jester_user = effect["jester_user"]
+        jester_until = effect["jester_until"]
+
+        update_needed = False
+
+        if curse_until and curse_until < now_utc:
+            cursed_user = None
+            curse_until = None
+            update_needed = True
+
+        if mime_until and mime_until < now_utc:
+            if mimed_user:
+                member = guild.get_member(mimed_user)
+                if member:
+                    try:
+                        await member.send("🙊 You have done well mime. You may now speak!")
+                    except:
+                        pass
+            mimed_user = None
+            mime_until = None
+            update_needed = True
+
+        if jester_until and jester_until < now_utc:
+            if jester_user:
+                member = guild.get_member(jester_user)
+                if member:
+                    try:
+                        new_name = clean_display_name(member.display_name)
+                        if new_name != member.display_name:
+                            await member.edit(nick=new_name)
+                    except:
+                        pass
+            jester_user = None
+            jester_until = None
+            update_needed = True
+
+        if update_needed:
+            await ensure_db()
+            async with pool.acquire() as conn:
+                await conn.execute("""
+                    UPDATE active_effects
+                    SET cursed_user = $2,
+                        curse_until = $3,
+                        mimed_user = $4,
+                        mime_until = $5,
+                        jester_user = $6,
+                        jester_until = $7
+                    WHERE guild_id = $1
+                """, guild.id,
+                   cursed_user, curse_until,
+                   mimed_user, mime_until,
+                   jester_user, jester_until)
+
+        if cursed_user == message.author.id and curse_until and curse_until >= now_utc:
+            if random.random() < 0.20:
+                try:
+                    await message.add_reaction("🦆")
+                except:
+                    pass
+                try:
+                    await message.channel.send("quack")
+                except:
+                    pass
+
+        if mimed_user == message.author.id and mime_until and mime_until >= now_utc:
+            content = message.content
+
+            if content and content.strip():
+                stripped = content.strip()
+
+                def is_emoji_char(c: str) -> bool:
+                    return c in emoji.EMOJI_DATA
+
+                if not all(is_emoji_char(c) or c.isspace() for c in stripped):
+                    try:
+                        await message.delete()
+                    except:
+                        pass
+                    return
+
+            await bot.process_commands(message)
+            return
+
+        if jester_user == message.author.id and jester_until and jester_until >= now_utc:
+            try:
+                if "🤡" not in message.author.display_name:
+                    await message.author.edit(nick=f"{message.author.display_name} 🤡")
+            except:
+                pass
+
+    await bot.process_commands(message)
+
+
 # ------------------------------------------------------------
-# ❤️ D_ZLOVE REACTION TRACKER (asyncpg version)
+# ❤️ D_ZLOVE REACTION TRACKER
 # ------------------------------------------------------------
 
 TARGET_CHANNEL_ID = 1500998760875167744
@@ -1624,15 +1630,15 @@ TARGET_EMOJI_NAME = "D_ZLove"
 TARGET_EMOJI_ID = 1295255068483784786
 
 
-# --- Database helpers using YOUR asyncpg pool ---
-
 async def get_love_total():
+    await ensure_db()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT total FROM d_zlove_total WHERE id = 1;")
         return row["total"] if row else 0
 
 
 async def set_love_total(value: int):
+    await ensure_db()
     async with pool.acquire() as conn:
         await conn.execute("""
             UPDATE d_zlove_total
@@ -1641,17 +1647,15 @@ async def set_love_total(value: int):
         """, value)
 
 
-# --- Reaction add/remove events ---
-
 @bot.event
 async def on_reaction_add(reaction, user):
     if user.bot:
         return
 
-    emoji = reaction.emoji
+    emoji_obj = reaction.emoji
     if (
-        getattr(emoji, "name", None) != TARGET_EMOJI_NAME
-        and getattr(emoji, "id", None) != TARGET_EMOJI_ID
+        getattr(emoji_obj, "name", None) != TARGET_EMOJI_NAME
+        and getattr(emoji_obj, "id", None) != TARGET_EMOJI_ID
     ):
         return
 
@@ -1664,10 +1668,10 @@ async def on_reaction_remove(reaction, user):
     if user.bot:
         return
 
-    emoji = reaction.emoji
+    emoji_obj = reaction.emoji
     if (
-        getattr(emoji, "name", None) != TARGET_EMOJI_NAME
-        and getattr(emoji, "id", None) != TARGET_EMOJI_ID
+        getattr(emoji_obj, "name", None) != TARGET_EMOJI_NAME
+        and getattr(emoji_obj, "id", None) != TARGET_EMOJI_ID
     ):
         return
 
@@ -1675,31 +1679,48 @@ async def on_reaction_remove(reaction, user):
     await set_love_total(max(0, total - 1))
 
 
-# --- Background updater loop ---
-
 async def update_love_channel():
+    global pool
     await bot.wait_until_ready()
+
+    while pool is None:
+        print("Waiting for database pool for love tracker...")
+        await asyncio.sleep(1)
+
     channel = bot.get_channel(TARGET_CHANNEL_ID)
 
     while True:
         total = await get_love_total()
         if channel:
-            await channel.edit(name=f"❤️: {total}")
+            try:
+                await channel.edit(name=f"❤️: {total}")
+            except:
+                pass
         await asyncio.sleep(300)  # 5 minutes
 
 
-# --- Proper scheduling for Python 3.13 / discord.py 2.3+ ---
+# -----------------------------------------
+# /forcesync + on_ready
+# -----------------------------------------
+
+@tree.command(name="forcesync", description="Force sync slash commands.")
+async def forcesync(interaction: discord.Interaction):
+    await tree.sync()
+    await interaction.response.send_message("Slash commands synced.")
+
 
 @bot.event
-async def setup_hook():
-    # Initialize the database BEFORE starting any tasks
+async def on_ready():
     await init_db()
+    await tree.sync()
 
-    # Now the pool exists — safe to start the loop
+    if not daily_reset_loop.is_running():
+        daily_reset_loop.start()
+
+    asyncio.create_task(kicker_loop())
     asyncio.create_task(update_love_channel())
 
-
-
+    print(f"Bot is online as {bot.user}")
 
 
 # -----------------------------------------

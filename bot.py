@@ -1320,6 +1320,29 @@ async def on_member_join(member: discord.Member):
     if member.bot:
         return
 
+    # -----------------------------------------------------
+    # STRICT 24H AUTO-KICK (DM → Kick instantly)
+    # -----------------------------------------------------
+    account_age_minutes = (discord.utils.utcnow() - member.created_at).total_seconds() / 60
+
+    if account_age_minutes < ACCOUNT_AGE_LIMIT_MINUTES:
+        # DM first (failure does NOT block kick)
+        try:
+            invite = "https://discord.gg/BqYVrX8rPK"
+            await member.send(
+                f"Hey! Your Discord account is too new to join **{member.guild.name}**.\n"
+                f"Please wait until your account is at least **24 hours old**, then rejoin using this link:\n{invite}"
+            )
+        except:
+            pass
+
+        # Kick instantly
+        await member.kick(reason="Account under 24 hours old (auto-kick)")
+        return
+
+    # -----------------------------------------------------
+    # JOIN TRACKING DATABASE INSERT
+    # -----------------------------------------------------
     await ensure_db()
     async with pool.acquire() as conn:
         await conn.execute("""
@@ -1327,6 +1350,7 @@ async def on_member_join(member: discord.Member):
             VALUES ($1, $2, NOW())
             ON CONFLICT (user_id, guild_id) DO NOTHING;
         """, member.id, member.guild.id)
+
 
 
 # ---------------------------------------------------------
@@ -1422,25 +1446,6 @@ async def kicker_loop():
                 if bypass_role_id and discord.utils.get(member.roles, id=bypass_role_id):
                     continue
 
-                # 1) 24H ACCOUNT AGE BARRIER (ALWAYS ON)
-                account_age_minutes = (now - member.created_at.replace(tzinfo=timezone.utc)).total_seconds() / 60
-
-                if account_age_minutes < ACCOUNT_AGE_LIMIT_MINUTES:
-                    try:
-                        invite_text = (
-                            f"Hey! You were kicked from **{guild.name}** because your account is under 24 hours old.\n\n"
-                            f"You’re welcome to rejoin once your account is older:\n"
-                            f"https://discord.gg/YOUR_INVITE_LINK"
-                        )
-                        try:
-                            await member.send(invite_text)
-                        except:
-                            pass
-
-                        await member.kick(reason="Account under 24 hours old (auto barrier)")
-                    except Exception as e:
-                        print(f"24h barrier kick failed for {member.id}: {e}")
-                    continue
 
                 # 2) SPEAK-TO-STAY SYSTEM (ONLY IF ENABLED)
                 if not speak_enabled:

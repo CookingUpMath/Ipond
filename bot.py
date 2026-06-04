@@ -1458,12 +1458,8 @@ async def kicker_loop():
                     WHERE user_id = $1 AND guild_id = $2
                 """, member.id, guild.id)
 
-                 # If no join record → auto‑repair by inserting one
-                if join_row is None:
-                    await pool.execute("""
-                        INSERT INTO join_tracking (user_id, guild_id, join_time)
-                        VALUES ($1, $2, $3)
-                    """, member.id, guild.id, datetime.utcnow())
+                # If no join record → they joined before system was added
+                if not join_row:
                     continue
 
 

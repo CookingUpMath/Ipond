@@ -142,16 +142,6 @@ async def init_db():
         );
         """)
 
-        # Join tracking for speak-to-stay
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS join_tracking (
-            user_id BIGINT,
-            guild_id BIGINT,
-            join_time TIMESTAMP,
-            PRIMARY KEY (user_id, guild_id)
-        );
-        """)
-
         # D_ZLove total tracker
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS d_zlove_total (
@@ -702,14 +692,14 @@ async def ensure_champion_role_holder(interaction: discord.Interaction) -> bool:
 
     if not row or not row["role_id"]:
         await interaction.response.send_message(
-            "❌ No champion role is set. Use `/setrole` first."
+            "❌ No champion role is set. Use `/settings` to set one first."
         )
         return False
 
     champion_role = guild.get_role(row["role_id"])
     if not champion_role:
         await interaction.response.send_message(
-            "❌ The champion role no longer exists. Set it again with `/setrole`."
+            "❌ The champion role no longer exists. Set it again with `/settings`."
         )
         return False
 
@@ -982,124 +972,6 @@ async def reseteffects(interaction: discord.Interaction, member: discord.Member 
 # ADMIN COMMANDS
 # -----------------------------------------
 
-@tree.command(name="setrole", description="Set the champion role for this server.")
-@admin_only()
-@app_commands.describe(role="The role that will be assigned to the daily champion.")
-async def setrole(interaction: discord.Interaction, role: discord.Role):
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO crown_settings (guild_id, role_id)
-            VALUES ($1, $2)
-            ON CONFLICT (guild_id)
-            DO UPDATE SET role_id = EXCLUDED.role_id
-        """, interaction.guild_id, role.id)
-
-    embed = discord.Embed(color=discord.Color.gold())
-    embed.description = (
-        "# 👑 Champion Role Updated\n"
-        f"-# New Role: {role.mention}"
-    )
-
-    await interaction.response.send_message(embed=embed)
-
-
-@tree.command(name="setannounce", description="Set the channel where champion announcements are posted.")
-@admin_only()
-async def setannounce(interaction: discord.Interaction, channel: discord.TextChannel):
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE guild_settings
-            SET announce_channel_id = $1
-            WHERE guild_id = $2
-        """, channel.id, interaction.guild_id)
-
-    embed = discord.Embed(color=discord.Color.blurple())
-    embed.description = (
-        "# 📢 Announce Channel Updated\n"
-        f"-# New Channel: {channel.mention}"
-    )
-
-    await interaction.response.send_message(embed=embed)
-
-
-@tree.command(name="setchampionvc", description="Set the VC used for champion nickname styling.")
-@admin_only()
-async def setchampionvc(interaction: discord.Interaction, channel: discord.VoiceChannel):
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE guild_settings
-            SET champion_vc_id = $1
-            WHERE guild_id = $2
-        """, channel.id, interaction.guild_id)
-
-    embed = discord.Embed(color=discord.Color.gold())
-    embed.description = (
-        "# 🎧 Champion VC Updated\n"
-        f"-# New VC: **{channel.name}**\n"
-    )
-
-    await interaction.response.send_message(embed=embed)
-
-
-@tree.command(name="settimezone", description="Set the server's timezone.")
-@admin_only()
-async def settimezone(interaction: discord.Interaction, timezone: str):
-
-    try:
-        pytz.timezone(timezone)
-    except:
-        await interaction.response.send_message("❌ Invalid timezone. Example: `EST`, `UTC`, `America/New_York`")
-        return
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE guild_settings
-            SET timezone_str = $1
-            WHERE guild_id = $2
-        """, timezone, interaction.guild_id)
-
-    embed = discord.Embed(color=discord.Color.green())
-    embed.description = (
-        "# ⏰ Timezone Updated\n"
-        f"-# New Timezone: **{timezone}**"
-    )
-
-    await interaction.response.send_message(embed=embed)
-
-
-@tree.command(name="setreset", description="Set the daily reset time (24h format).")
-@admin_only()
-async def setreset(interaction: discord.Interaction, hour: int, minute: int):
-
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        await interaction.response.send_message("❌ Invalid time. Use 24‑hour format.")
-        return
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE guild_settings
-            SET reset_hour = $1,
-                reset_minute = $2
-            WHERE guild_id = $3
-        """, hour, minute, interaction.guild_id)
-
-    embed = discord.Embed(color=discord.Color.orange())
-    embed.description = (
-        "# ⏳ Reset Time Updated\n"
-        f"-# New Time: **{hour:02d}:{minute:02d}**"
-    )
-
-    await interaction.response.send_message(embed=embed)
-
-
 @tree.command(name="forcereset", description="Force the daily reset now.")
 @admin_only()
 async def forcereset(interaction: discord.Interaction):
@@ -1199,116 +1071,196 @@ async def setchampion(interaction: discord.Interaction, member: discord.Member):
     await interaction.response.send_message(embed=embed)
 
 
-@tree.command(name="settings", description="View the server's crown and kicker settings.")
-async def settings_cmd(interaction: discord.Interaction):
+async def get_champion_role_id(guild_id: int):
+    await ensure_db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT role_id FROM crown_settings WHERE guild_id = $1", guild_id
+        )
+    return row["role_id"] if row else None
 
-    settings = await get_guild_settings(interaction.guild_id)
 
-    announce = (
-        f"<#{settings['announce_channel_id']}>" if settings["announce_channel_id"] else "Not set"
-    )
-    vc = (
-        f"<#{settings['champion_vc_id']}>" if settings["champion_vc_id"] else "Not set"
-    )
-    champion = (
-        f"<@{settings['current_champion_id']}>" if settings['current_champion_id'] else "None"
-    )
-    speak_state = "Enabled" if settings["speak_enabled"] else "Disabled"
-    speak_minutes = settings["speak_minutes"]
-    bypass_role = (
-        f"<@&{settings['kicker_bypass_role']}>" if settings["kicker_bypass_role"] else "None"
-    )
+async def build_settings_embed(guild_id: int) -> discord.Embed:
+    settings = await get_guild_settings(guild_id)
+    role_id = await get_champion_role_id(guild_id)
+
+    role = f"<@&{role_id}>" if role_id else "Not set"
+    announce = f"<#{settings['announce_channel_id']}>" if settings["announce_channel_id"] else "Not set"
+    vc = f"<#{settings['champion_vc_id']}>" if settings["champion_vc_id"] else "Not set"
+    champion = f"<@{settings['current_champion_id']}>" if settings["current_champion_id"] else "None"
 
     embed = discord.Embed(color=discord.Color.blue())
     embed.description = (
         "# ⚙️ Server Settings\n"
+        f"-# Champion Role: {role}\n"
         f"-# Announce Channel: {announce}\n"
         f"-# Champion VC: {vc}\n"
         f"-# Timezone: **{settings['timezone_str']}**\n"
         f"-# Reset Time: **{settings['reset_hour']:02d}:{settings['reset_minute']:02d}**\n"
         f"-# Current Champion: {champion}\n\n"
         f"## 🛡️ Kicker System\n"
-        f"-# 24h New-Account Barrier: **Always Enabled**\n"
-        f"-# Speak-to-Stay: **{speak_state}**\n"
-        f"-# Speak Timer: **{speak_minutes} minutes**\n"
-        f"-# Bypass Role: {bypass_role}"
+        f"-# 24h New-Account Barrier: **Always Enabled**"
+    )
+    embed.set_footer(text="Pick an option below to update a setting.")
+    return embed
+
+
+class TimezoneModal(discord.ui.Modal, title="Edit Timezone"):
+    timezone_input = discord.ui.TextInput(
+        label="Timezone", placeholder="EST, UTC, America/New_York", max_length=50
     )
 
-    await interaction.response.send_message(embed=embed)
+    def __init__(self, guild_id: int, parent_view: "SettingsView"):
+        super().__init__()
+        self.guild_id = guild_id
+        self.parent_view = parent_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        tz_str = str(self.timezone_input).strip()
+        try:
+            pytz.timezone(tz_str)
+        except Exception:
+            return await interaction.response.send_message(
+                "❌ Invalid timezone. Example: `EST`, `UTC`, `America/New_York`", ephemeral=True
+            )
+
+        await ensure_db()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE guild_settings SET timezone_str = $1 WHERE guild_id = $2",
+                tz_str, self.guild_id
+            )
+
+        embed = await build_settings_embed(self.guild_id)
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
+
+class ResetTimeModal(discord.ui.Modal, title="Edit Daily Reset Time"):
+    hour_input = discord.ui.TextInput(label="Hour (0-23)", max_length=2)
+    minute_input = discord.ui.TextInput(label="Minute (0-59)", max_length=2)
+
+    def __init__(self, guild_id: int, parent_view: "SettingsView"):
+        super().__init__()
+        self.guild_id = guild_id
+        self.parent_view = parent_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            hour = int(str(self.hour_input))
+            minute = int(str(self.minute_input))
+        except ValueError:
+            return await interaction.response.send_message(
+                "❌ Hour and minute must be numbers.", ephemeral=True
+            )
+
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return await interaction.response.send_message(
+                "❌ Invalid time. Use 24-hour format.", ephemeral=True
+            )
+
+        await ensure_db()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE guild_settings
+                SET reset_hour = $1, reset_minute = $2
+                WHERE guild_id = $3
+            """, hour, minute, self.guild_id)
+
+        embed = await build_settings_embed(self.guild_id)
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
+
+class SettingsView(discord.ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+
+        self.role_select = discord.ui.RoleSelect(
+            placeholder="👑 Set Champion Role", min_values=1, max_values=1
+        )
+        self.role_select.callback = self.on_role_select
+        self.add_item(self.role_select)
+
+        self.announce_select = discord.ui.ChannelSelect(
+            placeholder="📢 Set Announce Channel",
+            channel_types=[discord.ChannelType.text],
+            min_values=1, max_values=1,
+        )
+        self.announce_select.callback = self.on_announce_select
+        self.add_item(self.announce_select)
+
+        self.vc_select = discord.ui.ChannelSelect(
+            placeholder="🎧 Set Champion VC",
+            channel_types=[discord.ChannelType.voice],
+            min_values=1, max_values=1,
+        )
+        self.vc_select.callback = self.on_vc_select
+        self.add_item(self.vc_select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message(
+                "❌ You do not have permission to change these settings.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def _refresh(self, interaction: discord.Interaction):
+        embed = await build_settings_embed(self.guild_id)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def on_role_select(self, interaction: discord.Interaction):
+        role = self.role_select.values[0]
+        await ensure_db()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO crown_settings (guild_id, role_id)
+                VALUES ($1, $2)
+                ON CONFLICT (guild_id) DO UPDATE SET role_id = EXCLUDED.role_id
+            """, self.guild_id, role.id)
+        await self._refresh(interaction)
+
+    async def on_announce_select(self, interaction: discord.Interaction):
+        channel = self.announce_select.values[0]
+        await ensure_db()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE guild_settings SET announce_channel_id = $1 WHERE guild_id = $2",
+                channel.id, self.guild_id
+            )
+        await self._refresh(interaction)
+
+    async def on_vc_select(self, interaction: discord.Interaction):
+        channel = self.vc_select.values[0]
+        await ensure_db()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE guild_settings SET champion_vc_id = $1 WHERE guild_id = $2",
+                channel.id, self.guild_id
+            )
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="Edit Timezone", style=discord.ButtonStyle.secondary, emoji="⏰", row=3)
+    async def edit_timezone_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TimezoneModal(self.guild_id, self))
+
+    @discord.ui.button(label="Edit Reset Time", style=discord.ButtonStyle.secondary, emoji="⏳", row=3)
+    async def edit_reset_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ResetTimeModal(self.guild_id, self))
+
+
+@tree.command(name="settings", description="View and edit the server's crown and kicker settings.")
+@admin_only()
+async def settings_cmd(interaction: discord.Interaction):
+    embed = await build_settings_embed(interaction.guild_id)
+    view = SettingsView(interaction.guild_id)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 # ---------------------------------------------------------
-# 24H ACCOUNT-AGE KICKER + SPEAK-TO-STAY SYSTEM
+# 24H ACCOUNT-AGE KICKER
 # ---------------------------------------------------------
 
 ACCOUNT_AGE_LIMIT_MINUTES = 24 * 60  # 24 hours
-
-
-# ---------------------------------------------------------
-# KICKER DATABASE HELPERS
-# ---------------------------------------------------------
-
-async def ensure_kicker_columns(guild_id: int):
-    await ensure_db()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            ALTER TABLE guild_settings
-            ADD COLUMN IF NOT EXISTS speak_minutes INT DEFAULT 20160,
-            ADD COLUMN IF NOT EXISTS speak_enabled BOOLEAN DEFAULT FALSE,
-            ADD COLUMN IF NOT EXISTS kicker_bypass_role BIGINT;
-        """)
-
-        await conn.execute("""
-            INSERT INTO guild_settings (guild_id)
-            VALUES ($1)
-            ON CONFLICT (guild_id) DO NOTHING;
-        """, guild_id)
-
-
-async def get_kicker_settings(guild_id: int):
-    await ensure_kicker_columns(guild_id)
-
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            SELECT speak_minutes, speak_enabled, kicker_bypass_role
-            FROM guild_settings
-            WHERE guild_id = $1
-        """, guild_id)
-
-    return {
-        "speak_minutes": row["speak_minutes"],
-        "speak_enabled": row["speak_enabled"],
-        "bypass_role": row["kicker_bypass_role"],
-    }
-
-
-async def set_speak_minutes(guild_id: int, minutes: int):
-    await ensure_db()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE guild_settings
-            SET speak_minutes = $1
-            WHERE guild_id = $2
-        """, minutes, guild_id)
-
-
-async def set_speak_enabled(guild_id: int, enabled: bool):
-    await ensure_db()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE guild_settings
-            SET speak_enabled = $1
-            WHERE guild_id = $2
-        """, enabled, guild_id)
-
-
-async def set_kicker_bypass_role(guild_id: int, role_id: int | None):
-    await ensure_db()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE guild_settings
-            SET kicker_bypass_role = $1
-            WHERE guild_id = $2
-        """, role_id, guild_id)
 
 
 # ---------------------------------------------------------
@@ -1340,164 +1292,8 @@ async def on_member_join(member: discord.Member):
         await member.kick(reason="Account under 24 hours old (auto-kick)")
         return
 
-    # -----------------------------------------------------
-    # JOIN TRACKING DATABASE INSERT
-    # -----------------------------------------------------
-    await ensure_db()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO join_tracking (user_id, guild_id, join_time)
-            VALUES ($1, $2, NOW())
-            ON CONFLICT (user_id, guild_id) DO NOTHING;
-        """, member.id, member.guild.id)
-
-
-
-# ---------------------------------------------------------
-# SLASH COMMANDS (SPEAK-TO-STAY ONLY)
-# ---------------------------------------------------------
-
-@bot.tree.command(
-    name="setkicktimer",
-    description="Set how long a member can be inactive before being kicked (speak-to-stay)."
-)
-@commands.has_permissions(administrator=True)
-@app_commands.describe(
-    hours="Hours before kicking inactive members",
-    minutes="Minutes before kicking inactive members"
-)
-async def set_kick_timer(interaction: discord.Interaction, hours: int, minutes: int):
-    if hours < 0 or minutes < 0:
-        return await interaction.response.send_message("Hours and minutes must be positive.", ephemeral=True)
-
-    if minutes >= 60:
-        return await interaction.response.send_message("Minutes must be between 0 and 59.", ephemeral=True)
-
-    total_minutes = hours * 60 + minutes
-
-    if total_minutes < 1:
-        return await interaction.response.send_message("Timer must be at least 1 minute.", ephemeral=True)
-
-    await set_speak_minutes(interaction.guild.id, total_minutes)
-    await interaction.response.send_message(
-        f"Speak-to-stay inactivity timer set to **{hours}h {minutes}m**."
-    )
-
-
-@bot.tree.command(
-    name="setkickerbypass",
-    description="Set the shared bypass role for both systems."
-)
-@commands.has_permissions(administrator=True)
-@app_commands.describe(role="Role that should never be kicked by the system")
-async def set_kicker_bypass(interaction: discord.Interaction, role: discord.Role):
-    await set_kicker_bypass_role(interaction.guild.id, role.id)
-    await interaction.response.send_message(
-        f"Bypass role set to **{role.name}** for both systems."
-    )
-
-
-@bot.tree.command(
-    name="togglekicker",
-    description="Enable or disable the speak-to-stay system (24h barrier is always on)."
-)
-@commands.has_permissions(administrator=True)
-@app_commands.describe(state="Use 'on' or 'off'")
-async def toggle_kicker(interaction: discord.Interaction, state: str):
-    state = state.lower()
-    if state not in ["on", "off"]:
-        return await interaction.response.send_message("Use **on** or **off**.", ephemeral=True)
-
-    enabled = (state == "on")
-    await set_speak_enabled(interaction.guild.id, enabled)
-
-    await interaction.response.send_message(
-        f"Speak-to-stay system is now **{'ENABLED' if enabled else 'DISABLED'}**.\n"
-        f"> 24h new-account barrier remains **always ON**."
-    )
-
-
-# ---------------------------------------------------------
-# BACKGROUND KICKER LOOP
-# ---------------------------------------------------------
-
-async def kicker_loop():
-    global pool
-    await bot.wait_until_ready()
-
-    while pool is None:
-        print("Waiting for database pool...")
-        await asyncio.sleep(1)
-
-    while True:
-        now = datetime.now(timezone.utc)
-
-        for guild in bot.guilds:
-            settings = await get_kicker_settings(guild.id)
-            bypass_role_id = settings["bypass_role"]
-            speak_enabled = settings["speak_enabled"]
-            speak_minutes = settings["speak_minutes"]
-
-            for member in guild.members:
-                if member.bot:
-                    continue
-
-                # Shared bypass role
-                if bypass_role_id and discord.utils.get(member.roles, id=bypass_role_id):
-                    continue
-
-
-                # 2) SPEAK-TO-STAY SYSTEM (ONLY IF ENABLED)
-                if not speak_enabled:
-                    continue
-
-                # Fetch join time from DB
-                join_row = await pool.fetchrow("""
-                    SELECT join_time
-                    FROM join_tracking
-                    WHERE user_id = $1 AND guild_id = $2
-                """, member.id, guild.id)
-
-                # If no join record → they joined before system was added
-                if not join_row:
-                    continue
-
-
-                join_time = join_row["join_time"]
-                minutes_since_join = (now - join_time.replace(tzinfo=timezone.utc)).total_seconds() / 60
-
-                # Fetch last message timestamp
-                last_msg = await pool.fetchrow("""
-                    SELECT last_message
-                    FROM message_counts
-                    WHERE user_id = $1 AND guild_id = $2
-                """, member.id, guild.id)
-
-                # If they HAVE spoken → remove join tracking and skip
-                if last_msg and last_msg["last_message"]:
-                    await pool.execute("""
-                        DELETE FROM join_tracking
-                        WHERE user_id = $1 AND guild_id = $2
-                    """, member.id, guild.id)
-                    continue
-
-                # They have NOT spoken — check join timer
-                if minutes_since_join >= speak_minutes:
-                    try:
-                        await member.kick(reason=f"Inactive for {speak_minutes} minutes (speak-to-stay)")
-                    except Exception as e:
-                        print(f"Speak-to-stay kick failed for {member.id}: {e}")
-
-                    # Remove from join tracking after kick
-                    await pool.execute("""
-                        DELETE FROM join_tracking
-                        WHERE user_id = $1 AND guild_id = $2
-                    """, member.id, guild.id)
-
-        await asyncio.sleep(600)
-
 # -----------------------------------------
-# ON MESSAGE — COUNT + EFFECTS + JOIN CLEAR
+# ON MESSAGE — COUNT + EFFECTS
 # -----------------------------------------
 
 @bot.event
@@ -1510,13 +1306,6 @@ async def on_message(message: discord.Message):
         return
 
     await ensure_db()
-
-    # Remove join-tracking entry when user speaks
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            DELETE FROM join_tracking
-            WHERE user_id = $1 AND guild_id = $2;
-        """, message.author.id, guild.id)
 
     settings = await get_guild_settings(guild.id)
 
@@ -1723,7 +1512,6 @@ async def on_ready():
     if not daily_reset_loop.is_running():
         daily_reset_loop.start()
 
-    asyncio.create_task(kicker_loop())
     asyncio.create_task(update_love_channel())
 
     print(f"Bot is online as {bot.user}")

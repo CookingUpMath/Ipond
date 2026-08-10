@@ -367,6 +367,17 @@ async def apply_champion_role(guild: discord.Guild, new_champion: discord.Member
 async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: datetime):
     await ensure_db()
 
+    # Mark today as handled unconditionally — otherwise a day with zero
+    # messages would leave last_reset_date unchanged, and the catch-up
+    # check in daily_reset_loop would re-trigger this function every
+    # single minute for the rest of that day.
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE guild_settings
+            SET last_reset_date = $1
+            WHERE guild_id = $2
+        """, now.date(), guild.id)
+
     top = await get_top_user(guild.id)
 
     if top:
@@ -382,10 +393,9 @@ async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: dat
 
             await conn.execute("""
                 UPDATE guild_settings
-                SET current_champion_id = $1,
-                    last_reset_date = $2
-                WHERE guild_id = $3
-            """, winner_id, now.date(), guild.id)
+                SET current_champion_id = $1
+                WHERE guild_id = $2
+            """, winner_id, guild.id)
 
         winner_member = guild.get_member(winner_id)
 
@@ -473,15 +483,36 @@ async def daily_reset_loop():
     await ensure_db()
 
     for guild in bot.guilds:
-        settings = await get_guild_settings(guild.id)
-        tz = get_tz(settings)
+        try:
+            settings = await get_guild_settings(guild.id)
+            tz = get_tz(settings)
 
-        now = datetime.now(tz)
-        reset_hour = settings["reset_hour"]
-        reset_minute = settings["reset_minute"]
+            now = datetime.now(tz)
+            reset_hour = settings["reset_hour"]
+            reset_minute = settings["reset_minute"]
+            today = now.date()
 
-        if now.hour == reset_hour and now.minute == reset_minute:
-            await perform_reset_for_guild(guild, settings, now)
+            already_reset_today = settings["last_reset_date"] == today
+            past_reset_time = (now.hour, now.minute) >= (reset_hour, reset_minute)
+
+            if past_reset_time and not already_reset_today:
+                await perform_reset_for_guild(guild, settings, now)
+        except Exception as e:
+            # Never let one guild's failure (a DB hiccup, a Discord API
+            # error, anything) take down the loop for every other guild —
+            # or worse, kill the loop entirely with no retry.
+            print(f"[daily_reset_loop] error processing guild {guild.id}: {e}")
+            continue
+
+
+@daily_reset_loop.error
+async def daily_reset_loop_error(error):
+    # Belt-and-suspenders: if something still slips past the try/except
+    # above and the loop dies anyway, log it and restart it instead of
+    # silently going dark until the next unrelated bot restart.
+    print(f"[daily_reset_loop] loop crashed, restarting: {error}")
+    if not daily_reset_loop.is_running():
+        daily_reset_loop.start()
 
 
 # -----------------------------------------
@@ -1504,6 +1535,35 @@ async def forcesync(interaction: discord.Interaction):
     await interaction.response.send_message("Slash commands synced.")
 
 
+async def restore_champion_presence():
+    """Re-apply the current champion's status on startup — otherwise a
+    restart/redeploy leaves the bot blank until the next daily reset,
+    which could be up to 24 hours away.
+    """
+    await ensure_db()
+    for guild in bot.guilds:
+        settings = await get_guild_settings(guild.id)
+        champion_id = settings["current_champion_id"]
+        if not champion_id:
+            continue
+
+        member = guild.get_member(champion_id)
+        if not member:
+            continue
+
+        display_name = clean_display_name(member.display_name)
+        try:
+            await bot.change_presence(
+                activity=discord.Activity(
+                    type=discord.ActivityType.playing,
+                    name=f"👑 {display_name}"
+                )
+            )
+        except:
+            pass
+        return  # presence is bot-wide, not per-guild — first champion found wins
+
+
 @bot.event
 async def on_ready():
     await init_db()
@@ -1513,6 +1573,7 @@ async def on_ready():
         daily_reset_loop.start()
 
     asyncio.create_task(update_love_channel())
+    await restore_champion_presence()
 
     print(f"Bot is online as {bot.user}")
 

@@ -65,6 +65,7 @@ async def init_db():
             guild_id BIGINT PRIMARY KEY,
             announce_channel_id BIGINT,
             champion_vc_id BIGINT,
+            sticky_channel_id BIGINT,
             timezone_str TEXT DEFAULT 'EST',
             reset_hour INT DEFAULT 0,
             reset_minute INT DEFAULT 0,
@@ -74,6 +75,12 @@ async def init_db():
             speak_enabled BOOLEAN DEFAULT FALSE,
             kicker_bypass_role BIGINT
         );
+        """)
+
+        # Ensure sticky_channel_id exists on older databases
+        await conn.execute("""
+        ALTER TABLE guild_settings
+        ADD COLUMN IF NOT EXISTS sticky_channel_id BIGINT;
         """)
 
         # Daily message counts (now with last_message)
@@ -213,6 +220,7 @@ async def get_guild_settings(guild_id: int):
                 "guild_id": guild_id,
                 "announce_channel_id": None,
                 "champion_vc_id": None,
+                "sticky_channel_id": None,
                 "timezone_str": "EST",
                 "reset_hour": 0,
                 "reset_minute": 0,
@@ -1222,6 +1230,7 @@ async def build_settings_embed(guild_id: int) -> discord.Embed:
     role = f"<@&{role_id}>" if role_id else "Not set"
     announce = f"<#{settings['announce_channel_id']}>" if settings["announce_channel_id"] else "Not set"
     vc = f"<#{settings['champion_vc_id']}>" if settings["champion_vc_id"] else "Not set"
+    sticky = f"<#{settings['sticky_channel_id']}>" if settings.get("sticky_channel_id") else "Not set"
     champion = f"<@{settings['current_champion_id']}>" if settings["current_champion_id"] else "None"
 
     embed = discord.Embed(color=discord.Color.blue())
@@ -1230,6 +1239,7 @@ async def build_settings_embed(guild_id: int) -> discord.Embed:
         f"-# Champion Role: {role}\n"
         f"-# Announce Channel: {announce}\n"
         f"-# Champion VC: {vc}\n"
+        f"-# Sticky Notes Channel: {sticky}\n"
         f"-# Timezone: **{settings['timezone_str']}**\n"
         f"-# Reset Time: **{settings['reset_hour']:02d}:{settings['reset_minute']:02d}**\n"
         f"-# Current Champion: {champion}\n\n"
@@ -1332,6 +1342,14 @@ class SettingsView(discord.ui.View):
         self.vc_select.callback = self.on_vc_select
         self.add_item(self.vc_select)
 
+        self.sticky_select = discord.ui.ChannelSelect(
+            placeholder="📝 Set Sticky Notes Channel",
+            channel_types=[discord.ChannelType.text],
+            min_values=1, max_values=1,
+        )
+        self.sticky_select.callback = self.on_sticky_select
+        self.add_item(self.sticky_select)
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message(
@@ -1375,11 +1393,21 @@ class SettingsView(discord.ui.View):
             )
         await self._refresh(interaction)
 
-    @discord.ui.button(label="Edit Timezone", style=discord.ButtonStyle.secondary, emoji="⏰", row=3)
+    async def on_sticky_select(self, interaction: discord.Interaction):
+        channel = self.sticky_select.values[0]
+        await ensure_db()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE guild_settings SET sticky_channel_id = $1 WHERE guild_id = $2",
+                channel.id, self.guild_id
+            )
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="Edit Timezone", style=discord.ButtonStyle.secondary, emoji="⏰", row=4)
     async def edit_timezone_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(TimezoneModal(self.guild_id, self))
 
-    @discord.ui.button(label="Edit Reset Time", style=discord.ButtonStyle.secondary, emoji="⏳", row=3)
+    @discord.ui.button(label="Edit Reset Time", style=discord.ButtonStyle.secondary, emoji="⏳", row=4)
     async def edit_reset_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(ResetTimeModal(self.guild_id, self))
 
@@ -1906,6 +1934,26 @@ async def sticky(interaction: discord.Interaction, note: str):
     guild_id = interaction.guild.id
     user_id = interaction.user.id
 
+    # Require a configured sticky notes channel
+    settings = await get_guild_settings(guild_id)
+    sticky_channel_id = settings.get("sticky_channel_id")
+    if not sticky_channel_id:
+        await interaction.response.send_message(
+            "❌ No sticky notes channel is set yet.\n"
+            "-# An admin needs to set one in `/settings`.",
+            ephemeral=True,
+        )
+        return
+
+    sticky_channel = interaction.guild.get_channel(sticky_channel_id)
+    if sticky_channel is None or not isinstance(sticky_channel, discord.TextChannel):
+        await interaction.response.send_message(
+            "❌ The sticky notes channel no longer exists.\n"
+            "-# An admin needs to set a new one in `/settings`.",
+            ephemeral=True,
+        )
+        return
+
     # Must have at least 1 sticky
     balance = await get_sticky_balance(guild_id, user_id)
     if balance < 1:
@@ -1946,8 +1994,7 @@ async def sticky(interaction: discord.Interaction, note: str):
         image_buffer = create_sticky_note(note, display_name, user_color=user_color)
     except Exception as e:
         log.error("Failed to generate sticky note: %s", e)
-        # Refund on failure
-        await add_stickies(guild_id, user_id, 1)
+        await add_stickies(guild_id, user_id, 1)  # refund
         await interaction.response.send_message(
             "❌ Something went wrong making your sticky note. Your sticky was refunded.",
             ephemeral=True,
@@ -1958,9 +2005,24 @@ async def sticky(interaction: discord.Interaction, note: str):
     remaining_display = format_sticky_count(remaining)
 
     file = discord.File(image_buffer, filename="sticky.png")
+
+    # Post the note in the dedicated channel
+    try:
+        await sticky_channel.send(file=file)
+    except Exception as e:
+        log.error("Failed to post sticky note to channel %s: %s", sticky_channel_id, e)
+        await add_stickies(guild_id, user_id, 1)  # refund
+        await interaction.response.send_message(
+            "❌ Couldn’t post to the sticky notes channel. Your sticky was refunded.",
+            ephemeral=True,
+        )
+        return
+
+    # Quiet confirmation to the user
     await interaction.response.send_message(
-        content=f"-# 📝 Stickies left: **{remaining_display}**",
-        file=file,
+        f"✅ Sticky posted in {sticky_channel.mention}\n"
+        f"-# 📝 Stickies left: **{remaining_display}**",
+        ephemeral=True,
     )
 
 

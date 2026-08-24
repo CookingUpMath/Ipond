@@ -1,6 +1,8 @@
 import os
 import random
 import asyncio
+import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
@@ -9,6 +11,16 @@ from discord import app_commands
 from discord.ext import commands, tasks
 import pytz
 import emoji
+
+# -----------------------------------------
+# LOGGING
+# -----------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+log = logging.getLogger("crown-bot")
 
 # -----------------------------------------
 # BOT + INTENTS
@@ -25,10 +37,13 @@ tree = bot.tree
 # DATABASE CONNECTION
 # -----------------------------------------
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:xdbadtLrYdLWvRUjgnyyjsIGBnjWeyRf@postgres.railway.internal:5432/railway"
-)
+# Require the env var — never hardcode credentials in source.
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL environment variable is required. "
+        "Do not hardcode credentials in the source code."
+    )
 
 pool: asyncpg.Pool | None = None
 
@@ -157,7 +172,7 @@ async def init_db():
         ON CONFLICT (id) DO NOTHING;
         """)
 
-    print("Database initialized and tables ensured.")
+    log.info("Database initialized and tables ensured.")
 
 
 async def ensure_db():
@@ -201,12 +216,25 @@ async def get_guild_settings(guild_id: int):
 def get_tz(settings: dict):
     try:
         return pytz.timezone(settings["timezone_str"])
-    except:
+    except Exception:
         return pytz.timezone("EST")
 
 
 def clean_display_name(name: str) -> str:
     return name.replace(" 🤡", "").replace("🤡", "").strip()
+
+
+def utcnow() -> datetime:
+    """Timezone-aware UTC now."""
+    return datetime.now(timezone.utc)
+
+
+def to_naive_utc(dt: datetime) -> datetime:
+    """Convert aware datetime to naive UTC for storage (asyncpg TIMESTAMP)."""
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
 
 # -----------------------------------------
 # MESSAGE + STATS HELPERS
@@ -295,15 +323,17 @@ async def set_active_effect(guild_id: int, effect_type: str, user_id: int, until
         jester_user = row["jester_user"] if row else None
         jester_until = row["jester_until"] if row else None
 
+        naive_until = to_naive_utc(until_utc)
+
         if effect_type == "curse":
             cursed_user = user_id
-            curse_until = until_utc
+            curse_until = naive_until
         elif effect_type == "mime":
             mimed_user = user_id
-            mime_until = until_utc
+            mime_until = naive_until
         elif effect_type == "jester":
             jester_user = user_id
-            jester_until = until_utc
+            jester_until = naive_until
 
         await conn.execute("""
             INSERT INTO active_effects (guild_id, cursed_user, curse_until, mimed_user, mime_until, jester_user, jester_until)
@@ -350,14 +380,14 @@ async def apply_champion_role(guild: discord.Guild, new_champion: discord.Member
         if member != new_champion:
             try:
                 await member.remove_roles(role, reason="New champion crowned")
-            except:
-                pass
+            except Exception as e:
+                log.warning("Failed to remove champion role from %s: %s", member.id, e)
 
     if new_champion and role not in new_champion.roles:
         try:
             await new_champion.add_roles(role, reason="Champion crowned")
-        except:
-            pass
+        except Exception as e:
+            log.warning("Failed to add champion role to %s: %s", new_champion.id, e)
 
 
 # -----------------------------------------
@@ -415,16 +445,16 @@ async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: dat
                 if role:
                     try:
                         await role.edit(name=f"👑 {display_name}")
-                    except:
-                        pass
+                    except Exception as e:
+                        log.warning("Failed to rename champion role: %s", e)
 
             if settings["champion_vc_id"]:
                 vc = guild.get_channel(settings["champion_vc_id"])
                 if isinstance(vc, discord.VoiceChannel):
                     try:
                         await vc.edit(name=f"👑: {display_name}")
-                    except:
-                        pass
+                    except Exception as e:
+                        log.warning("Failed to rename champion VC: %s", e)
 
             try:
                 await bot.change_presence(
@@ -433,8 +463,8 @@ async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: dat
                         name=f"👑 {display_name}"
                     )
                 )
-            except:
-                pass
+            except Exception as e:
+                log.warning("Failed to update presence: %s", e)
 
         if settings["announce_channel_id"]:
             channel = guild.get_channel(settings["announce_channel_id"])
@@ -449,8 +479,8 @@ async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: dat
                 )
                 try:
                     await channel.send(embed=embed)
-                except:
-                    pass
+                except Exception as e:
+                    log.warning("Failed to send champion announcement: %s", e)
 
     await reset_daily_counts(guild.id)
     await reset_daily_power_usage(guild.id)
@@ -474,8 +504,8 @@ async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: dat
                 new_name = clean_display_name(member.display_name)
                 if new_name != member.display_name:
                     await member.edit(nick=new_name)
-            except:
-                pass
+            except Exception as e:
+                log.warning("Failed to clean jester nick for %s: %s", member.id, e)
 
 
 @tasks.loop(minutes=1)
@@ -498,19 +528,14 @@ async def daily_reset_loop():
             if past_reset_time and not already_reset_today:
                 await perform_reset_for_guild(guild, settings, now)
         except Exception as e:
-            # Never let one guild's failure (a DB hiccup, a Discord API
-            # error, anything) take down the loop for every other guild —
-            # or worse, kill the loop entirely with no retry.
-            print(f"[daily_reset_loop] error processing guild {guild.id}: {e}")
+            # Never let one guild's failure take down the loop for every other guild.
+            log.error("[daily_reset_loop] error processing guild %s: %s", guild.id, e)
             continue
 
 
 @daily_reset_loop.error
 async def daily_reset_loop_error(error):
-    # Belt-and-suspenders: if something still slips past the try/except
-    # above and the loop dies anyway, log it and restart it instead of
-    # silently going dark until the next unrelated bot restart.
-    print(f"[daily_reset_loop] loop crashed, restarting: {error}")
+    log.error("[daily_reset_loop] loop crashed, restarting: %s", error)
     if not daily_reset_loop.is_running():
         daily_reset_loop.start()
 
@@ -588,6 +613,7 @@ async def leaderboard(interaction: discord.Interaction):
     )
 
     await interaction.response.send_message(embed=embed)
+
 
 # -----------------------------------------
 # /stats — VIEW USER STATS
@@ -776,7 +802,7 @@ async def curse(interaction: discord.Interaction, member: discord.Member):
     if reset_time <= now:
         reset_time += timedelta(days=1)
 
-    until_utc = reset_time.astimezone(pytz.utc).replace(tzinfo=None)
+    until_utc = reset_time.astimezone(timezone.utc)
     await set_active_effect(guild_id, "curse", member.id, until_utc)
 
     embed = discord.Embed(color=discord.Color.red())
@@ -811,7 +837,7 @@ async def mime(interaction: discord.Interaction, member: discord.Member):
     await increment_crown_use(guild_id, user_id, "mime")
     await increment_victim_stat(guild_id, member.id, "mime")
 
-    until = datetime.utcnow() + timedelta(minutes=30)
+    until = utcnow() + timedelta(minutes=30)
     await set_active_effect(guild_id, "mime", member.id, until)
 
     embed = discord.Embed(color=discord.Color.dark_gray())
@@ -859,7 +885,7 @@ async def jester(interaction: discord.Interaction, member: discord.Member):
         reset_time += timedelta(days=1)
 
     jester_end_local = reset_time - timedelta(minutes=5)
-    until_utc = jester_end_local.astimezone(pytz.utc).replace(tzinfo=None)
+    until_utc = jester_end_local.astimezone(timezone.utc)
 
     await set_active_effect(guild_id, "jester", member.id, until_utc)
 
@@ -872,6 +898,7 @@ async def jester(interaction: discord.Interaction, member: discord.Member):
     )
 
     await interaction.response.send_message(embed=embed)
+
 
 # -----------------------------------------
 # /reseteffects — ADMIN
@@ -912,7 +939,7 @@ async def reseteffects(interaction: discord.Interaction, member: discord.Member 
             if user:
                 try:
                     await user.send("🙊 You have done well mime. You may now speak!")
-                except:
+                except Exception:
                     pass
 
         for uid in jester_users:
@@ -922,8 +949,8 @@ async def reseteffects(interaction: discord.Interaction, member: discord.Member 
                     new_name = clean_display_name(user.display_name)
                     if new_name != user.display_name:
                         await user.edit(nick=new_name)
-                except:
-                    pass
+                except Exception as e:
+                    log.warning("Failed to clean jester nick on reset: %s", e)
 
         await ensure_db()
         async with pool.acquire() as conn:
@@ -945,8 +972,8 @@ async def reseteffects(interaction: discord.Interaction, member: discord.Member 
             if channel:
                 try:
                     await channel.send("🔧 All crown effects have been reset by an admin.")
-                except:
-                    pass
+                except Exception as e:
+                    log.warning("Failed to send effects-reset announcement: %s", e)
 
         await interaction.response.send_message("✅ All effects have been reset.")
         return
@@ -964,7 +991,7 @@ async def reseteffects(interaction: discord.Interaction, member: discord.Member 
     if effect["mimed_user"] == target.id:
         try:
             await target.send("🙊 You have done well mime. You may now speak!")
-        except:
+        except Exception:
             pass
 
     if effect["jester_user"] == target.id:
@@ -972,8 +999,8 @@ async def reseteffects(interaction: discord.Interaction, member: discord.Member 
             new_name = clean_display_name(target.display_name)
             if new_name != target.display_name:
                 await target.edit(nick=new_name)
-        except:
-            pass
+        except Exception as e:
+            log.warning("Failed to clean jester nick for single reset: %s", e)
 
     await ensure_db()
     async with pool.acquire() as conn:
@@ -993,8 +1020,8 @@ async def reseteffects(interaction: discord.Interaction, member: discord.Member 
         if channel:
             try:
                 await channel.send(f"🔧 Crown effects have been reset for {target.mention} by an admin.")
-            except:
-                pass
+            except Exception as e:
+                log.warning("Failed to send single-user effects-reset announcement: %s", e)
 
     await interaction.response.send_message(f"✅ All effects cleared for {target.mention}.")
 
@@ -1072,16 +1099,16 @@ async def setchampion(interaction: discord.Interaction, member: discord.Member):
         if role:
             try:
                 await role.edit(name=f"👑 {display_name}")
-            except:
-                pass
+            except Exception as e:
+                log.warning("Failed to rename champion role in setchampion: %s", e)
 
     if settings["champion_vc_id"]:
         vc = guild.get_channel(settings["champion_vc_id"])
         if isinstance(vc, discord.VoiceChannel):
             try:
                 await vc.edit(name=f"👑: {display_name}")
-            except:
-                pass
+            except Exception as e:
+                log.warning("Failed to rename champion VC in setchampion: %s", e)
 
     try:
         await bot.change_presence(
@@ -1090,8 +1117,8 @@ async def setchampion(interaction: discord.Interaction, member: discord.Member):
                 name=f"👑 {display_name}"
             )
         )
-    except:
-        pass
+    except Exception as e:
+        log.warning("Failed to update presence in setchampion: %s", e)
 
     embed = discord.Embed(color=discord.Color.gold())
     embed.description = (
@@ -1287,11 +1314,15 @@ async def settings_cmd(interaction: discord.Interaction):
     view = SettingsView(interaction.guild_id)
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
+
 # ---------------------------------------------------------
 # 24H ACCOUNT-AGE KICKER
 # ---------------------------------------------------------
 
 ACCOUNT_AGE_LIMIT_MINUTES = 24 * 60  # 24 hours
+
+# Optional: override the rejoin invite via env var (recommended)
+KICKER_REJOIN_INVITE = os.getenv("KICKER_REJOIN_INVITE", "https://discord.gg/BqYVrX8rPK")
 
 
 # ---------------------------------------------------------
@@ -1311,21 +1342,51 @@ async def on_member_join(member: discord.Member):
     if account_age_minutes < ACCOUNT_AGE_LIMIT_MINUTES:
         # DM first (failure does NOT block kick)
         try:
-            invite = "https://discord.gg/BqYVrX8rPK"
             await member.send(
                 f"Hey! Your Discord account is too new to join **{member.guild.name}**.\n"
-                f"Please wait until your account is at least **24 hours old**, then rejoin using this link:\n{invite}"
+                f"Please wait until your account is at least **24 hours old**, then rejoin using this link:\n"
+                f"{KICKER_REJOIN_INVITE}"
             )
-        except:
+        except Exception:
             pass
 
         # Kick instantly
-        await member.kick(reason="Account under 24 hours old (auto-kick)")
+        try:
+            await member.kick(reason="Account under 24 hours old (auto-kick)")
+        except Exception as e:
+            log.warning("Failed to kick new account %s: %s", member.id, e)
         return
+
 
 # -----------------------------------------
 # ON MESSAGE — COUNT + EFFECTS
 # -----------------------------------------
+
+# Regex for Discord custom emojis (static + animated)
+CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:\d+>")
+
+
+def is_emoji_only(text: str) -> bool:
+    """
+    Return True if the message contains only Unicode emoji, custom Discord
+    emojis, and whitespace. Everything else (letters, numbers, punctuation
+    outside of emoji syntax) is considered text and should be deleted under mime.
+    """
+    if not text or not text.strip():
+        return True
+
+    # Remove custom emoji syntax first
+    cleaned = CUSTOM_EMOJI_RE.sub("", text)
+
+    for c in cleaned:
+        if c.isspace():
+            continue
+        if c in emoji.EMOJI_DATA:
+            continue
+        # Anything left is considered real text
+        return False
+    return True
+
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -1338,8 +1399,6 @@ async def on_message(message: discord.Message):
 
     await ensure_db()
 
-    settings = await get_guild_settings(guild.id)
-
     await increment_message_count(guild.id, message.author.id)
 
     async with pool.acquire() as conn:
@@ -1347,7 +1406,7 @@ async def on_message(message: discord.Message):
             SELECT * FROM active_effects WHERE guild_id = $1
         """, guild.id)
 
-    now_utc = datetime.utcnow()
+    now_utc = utcnow().replace(tzinfo=None)  # naive for comparison with stored TIMESTAMP
 
     if effect:
         cursed_user = effect["cursed_user"]
@@ -1370,7 +1429,7 @@ async def on_message(message: discord.Message):
                 if member:
                     try:
                         await member.send("🙊 You have done well mime. You may now speak!")
-                    except:
+                    except Exception:
                         pass
             mimed_user = None
             mime_until = None
@@ -1384,8 +1443,8 @@ async def on_message(message: discord.Message):
                         new_name = clean_display_name(member.display_name)
                         if new_name != member.display_name:
                             await member.edit(nick=new_name)
-                    except:
-                        pass
+                    except Exception as e:
+                        log.warning("Failed to clean expired jester nick: %s", e)
             jester_user = None
             jester_until = None
             update_needed = True
@@ -1407,42 +1466,36 @@ async def on_message(message: discord.Message):
                    mimed_user, mime_until,
                    jester_user, jester_until)
 
+        # Curse effect
         if cursed_user == message.author.id and curse_until and curse_until >= now_utc:
             if random.random() < 0.20:
                 try:
                     await message.add_reaction("🦆")
-                except:
+                except Exception:
                     pass
                 try:
                     await message.channel.send("quack")
-                except:
+                except Exception:
                     pass
 
+        # Mime effect
         if mimed_user == message.author.id and mime_until and mime_until >= now_utc:
-            content = message.content
+            content = message.content or ""
 
-            if content and content.strip():
-                stripped = content.strip()
+            if content.strip() and not is_emoji_only(content):
+                try:
+                    await message.delete()
+                except Exception as e:
+                    log.warning("Failed to delete mimed message: %s", e)
+                return  # do not process commands on deleted messages
 
-                def is_emoji_char(c: str) -> bool:
-                    return c in emoji.EMOJI_DATA
-
-                if not all(is_emoji_char(c) or c.isspace() for c in stripped):
-                    try:
-                        await message.delete()
-                    except:
-                        pass
-                    return
-
-            await bot.process_commands(message)
-            return
-
+        # Jester effect
         if jester_user == message.author.id and jester_until and jester_until >= now_utc:
             try:
                 if "🤡" not in message.author.display_name:
                     await message.author.edit(nick=f"{message.author.display_name} 🤡")
-            except:
-                pass
+            except Exception as e:
+                log.warning("Failed to apply jester nick: %s", e)
 
     await bot.process_commands(message)
 
@@ -1451,9 +1504,10 @@ async def on_message(message: discord.Message):
 # ❤️ D_ZLOVE REACTION TRACKER
 # ------------------------------------------------------------
 
-TARGET_CHANNEL_ID = 1500998760875167744
-TARGET_EMOJI_NAME = "D_ZLove"
-TARGET_EMOJI_ID = 1295255068483784786
+# Prefer environment variables so the bot is not tied to one server.
+TARGET_CHANNEL_ID = int(os.getenv("LOVE_CHANNEL_ID", "1500998760875167744"))
+TARGET_EMOJI_NAME = os.getenv("LOVE_EMOJI_NAME", "D_ZLove")
+TARGET_EMOJI_ID = int(os.getenv("LOVE_EMOJI_ID", "1295255068483784786"))
 
 
 async def get_love_total():
@@ -1510,7 +1564,7 @@ async def update_love_channel():
     await bot.wait_until_ready()
 
     while pool is None:
-        print("Waiting for database pool for love tracker...")
+        log.info("Waiting for database pool for love tracker...")
         await asyncio.sleep(1)
 
     channel = bot.get_channel(TARGET_CHANNEL_ID)
@@ -1520,8 +1574,8 @@ async def update_love_channel():
         if channel:
             try:
                 await channel.edit(name=f"❤️: {total}")
-            except:
-                pass
+            except Exception as e:
+                log.warning("Failed to update love channel name: %s", e)
         await asyncio.sleep(300)  # 5 minutes
 
 
@@ -1559,8 +1613,8 @@ async def restore_champion_presence():
                     name=f"👑 {display_name}"
                 )
             )
-        except:
-            pass
+        except Exception as e:
+            log.warning("Failed to restore champion presence: %s", e)
         return  # presence is bot-wide, not per-guild — first champion found wins
 
 
@@ -1575,7 +1629,7 @@ async def on_ready():
     asyncio.create_task(update_love_channel())
     await restore_champion_presence()
 
-    print(f"Bot is online as {bot.user}")
+    log.info("Bot is online as %s", bot.user)
 
 
 # -----------------------------------------
@@ -1601,6 +1655,6 @@ async def on_disconnect():
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 if not TOKEN:
-    print("ERROR: DISCORD_TOKEN environment variable not set.")
+    log.error("ERROR: DISCORD_TOKEN environment variable not set.")
 else:
     bot.run(TOKEN)

@@ -3,6 +3,8 @@ import random
 import asyncio
 import logging
 import re
+import io
+import textwrap
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
@@ -11,6 +13,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 import pytz
 import emoji
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 
 # -----------------------------------------
 # LOGGING
@@ -62,6 +65,7 @@ async def init_db():
             guild_id BIGINT PRIMARY KEY,
             announce_channel_id BIGINT,
             champion_vc_id BIGINT,
+            sticky_channel_id BIGINT,
             timezone_str TEXT DEFAULT 'EST',
             reset_hour INT DEFAULT 0,
             reset_minute INT DEFAULT 0,
@@ -71,6 +75,12 @@ async def init_db():
             speak_enabled BOOLEAN DEFAULT FALSE,
             kicker_bypass_role BIGINT
         );
+        """)
+
+        # Ensure sticky_channel_id exists on older databases
+        await conn.execute("""
+        ALTER TABLE guild_settings
+        ADD COLUMN IF NOT EXISTS sticky_channel_id BIGINT;
         """)
 
         # Daily message counts (now with last_message)
@@ -172,6 +182,16 @@ async def init_db():
         ON CONFLICT (id) DO NOTHING;
         """)
 
+        # Sticky note balances (earned by winning the crown)
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS sticky_balances (
+            guild_id BIGINT,
+            user_id BIGINT,
+            balance INT DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id)
+        );
+        """)
+
     log.info("Database initialized and tables ensured.")
 
 
@@ -200,6 +220,7 @@ async def get_guild_settings(guild_id: int):
                 "guild_id": guild_id,
                 "announce_channel_id": None,
                 "champion_vc_id": None,
+                "sticky_channel_id": None,
                 "timezone_str": "EST",
                 "reset_hour": 0,
                 "reset_minute": 0,
@@ -269,6 +290,58 @@ async def get_top_user(guild_id: int):
             ORDER BY count DESC
             LIMIT 1
         """, guild_id)
+
+
+# -----------------------------------------
+# STICKY BALANCE HELPERS
+# -----------------------------------------
+
+STICKY_MAX_BALANCE = 100
+STICKY_REWARD_ON_CROWN = 2
+
+
+async def get_sticky_balance(guild_id: int, user_id: int) -> int:
+    await ensure_db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT balance FROM sticky_balances
+            WHERE guild_id = $1 AND user_id = $2
+        """, guild_id, user_id)
+    return row["balance"] if row else 0
+
+
+async def add_stickies(guild_id: int, user_id: int, amount: int) -> int:
+    """Add stickies, capped at STICKY_MAX_BALANCE. Returns new balance."""
+    await ensure_db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO sticky_balances (guild_id, user_id, balance)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (guild_id, user_id)
+            DO UPDATE SET balance = LEAST(sticky_balances.balance + $3, $4)
+            RETURNING balance
+        """, guild_id, user_id, amount, STICKY_MAX_BALANCE)
+    return row["balance"]
+
+
+async def spend_sticky(guild_id: int, user_id: int) -> bool:
+    """Spend 1 sticky if available. Returns True on success."""
+    await ensure_db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE sticky_balances
+            SET balance = balance - 1
+            WHERE guild_id = $1 AND user_id = $2 AND balance > 0
+            RETURNING balance
+        """, guild_id, user_id)
+    return row is not None
+
+
+def format_sticky_count(n: int) -> str:
+    """Display 💯 when at max, otherwise the number."""
+    if n >= STICKY_MAX_BALANCE:
+        return "💯"
+    return str(n)
 
 
 async def increment_crown_use(guild_id: int, user_id: int, power: str):
@@ -427,6 +500,9 @@ async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: dat
                 WHERE guild_id = $2
             """, winner_id, guild.id)
 
+        # Award sticky notes for winning the crown
+        await add_stickies(guild.id, winner_id, STICKY_REWARD_ON_CROWN)
+
         winner_member = guild.get_member(winner_id)
 
         if winner_member:
@@ -475,7 +551,8 @@ async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: dat
                 embed.description = (
                     "# 🏆 Daily Champion\n"
                     f"-# Reset Time: {reset_hour:02d}:{reset_minute:02d} {settings['timezone_str']}\n\n"
-                    f"👑 **<@{winner_id}>** is today's champion with **{top['count']} messages!**"
+                    f"👑 **<@{winner_id}>** is today's champion with **{top['count']} messages!**\n"
+                    f"-# 📝 +{STICKY_REWARD_ON_CROWN} stickies awarded"
                 )
                 try:
                     await channel.send(embed=embed)
@@ -637,6 +714,10 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
         """, guild_id, user_id)
     daily_count = daily["count"] if daily else 0
 
+    # Sticky balance
+    sticky_count = await get_sticky_balance(guild_id, user_id)
+    sticky_display = format_sticky_count(sticky_count)
+
     # All-time wins
     async with pool.acquire() as conn:
         wins = await conn.fetchrow("""
@@ -678,6 +759,7 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
 
     embed.description = (
         f"# 🗯️ {user.display_name}'s Stats\n"
+        f"📝 Stickies: **{sticky_display}**\n"
         f"🗓️ Messages Today: **{daily_count}**\n"
         f"👑 Crowned: **{win_count}**\n"
         f"⚡ Powers Used: **{total_casted}**\n"
@@ -1083,6 +1165,9 @@ async def setchampion(interaction: discord.Interaction, member: discord.Member):
             WHERE guild_id = $3
         """, member.id, now.date(), guild.id)
 
+    # Award sticky notes for being set as champion
+    await add_stickies(guild.id, member.id, STICKY_REWARD_ON_CROWN)
+
     await apply_champion_role(guild, member)
 
     display_name = clean_display_name(member.display_name)
@@ -1145,6 +1230,7 @@ async def build_settings_embed(guild_id: int) -> discord.Embed:
     role = f"<@&{role_id}>" if role_id else "Not set"
     announce = f"<#{settings['announce_channel_id']}>" if settings["announce_channel_id"] else "Not set"
     vc = f"<#{settings['champion_vc_id']}>" if settings["champion_vc_id"] else "Not set"
+    sticky = f"<#{settings['sticky_channel_id']}>" if settings.get("sticky_channel_id") else "Not set"
     champion = f"<@{settings['current_champion_id']}>" if settings["current_champion_id"] else "None"
 
     embed = discord.Embed(color=discord.Color.blue())
@@ -1153,6 +1239,7 @@ async def build_settings_embed(guild_id: int) -> discord.Embed:
         f"-# Champion Role: {role}\n"
         f"-# Announce Channel: {announce}\n"
         f"-# Champion VC: {vc}\n"
+        f"-# Sticky Notes Channel: {sticky}\n"
         f"-# Timezone: **{settings['timezone_str']}**\n"
         f"-# Reset Time: **{settings['reset_hour']:02d}:{settings['reset_minute']:02d}**\n"
         f"-# Current Champion: {champion}\n\n"
@@ -1255,6 +1342,14 @@ class SettingsView(discord.ui.View):
         self.vc_select.callback = self.on_vc_select
         self.add_item(self.vc_select)
 
+        self.sticky_select = discord.ui.ChannelSelect(
+            placeholder="📝 Set Sticky Notes Channel",
+            channel_types=[discord.ChannelType.text],
+            min_values=1, max_values=1,
+        )
+        self.sticky_select.callback = self.on_sticky_select
+        self.add_item(self.sticky_select)
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message(
@@ -1298,11 +1393,21 @@ class SettingsView(discord.ui.View):
             )
         await self._refresh(interaction)
 
-    @discord.ui.button(label="Edit Timezone", style=discord.ButtonStyle.secondary, emoji="⏰", row=3)
+    async def on_sticky_select(self, interaction: discord.Interaction):
+        channel = self.sticky_select.values[0]
+        await ensure_db()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE guild_settings SET sticky_channel_id = $1 WHERE guild_id = $2",
+                channel.id, self.guild_id
+            )
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="Edit Timezone", style=discord.ButtonStyle.secondary, emoji="⏰", row=4)
     async def edit_timezone_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(TimezoneModal(self.guild_id, self))
 
-    @discord.ui.button(label="Edit Reset Time", style=discord.ButtonStyle.secondary, emoji="⏳", row=3)
+    @discord.ui.button(label="Edit Reset Time", style=discord.ButtonStyle.secondary, emoji="⏳", row=4)
     async def edit_reset_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(ResetTimeModal(self.guild_id, self))
 
@@ -1630,6 +1735,295 @@ async def on_ready():
     await restore_champion_presence()
 
     log.info("Bot is online as %s", bot.user)
+
+
+# -----------------------------------------
+# STICKY NOTES
+# -----------------------------------------
+
+STICKY_MAX_CHARS = 120
+
+# Very basic blocklist — expand as needed
+STICKY_BLOCKED = {
+    "discord.gg", "http://", "https://", "@everyone", "@here",
+    "nigger", "faggot", "retard",  # hard blocked slurs
+}
+
+# Soft pastel sticky colors (R, G, B)
+STICKY_COLORS = [
+    (255, 249, 196),  # soft yellow
+    (255, 224, 230),  # soft pink
+    (220, 237, 255),  # soft blue
+    (232, 245, 233),  # soft green
+    (255, 236, 210),  # soft peach
+    (237, 231, 246),  # soft lavender
+    (255, 243, 224),  # warm cream
+]
+
+# Handwriting font
+STICKY_FONT_PATH = "/usr/share/fonts/SlidesCarnival/google/Patrick Hand/PatrickHand-Regular.ttf"
+STICKY_NAME_FONT_PATH = STICKY_FONT_PATH
+
+
+def _sticky_is_clean(text: str) -> tuple[bool, str]:
+    """Basic moderation check. Returns (ok, reason)."""
+    lowered = text.lower().strip()
+    if not lowered:
+        return False, "Note cannot be empty."
+    if len(text) > STICKY_MAX_CHARS:
+        return False, f"Note is too long (max {STICKY_MAX_CHARS} characters)."
+    for bad in STICKY_BLOCKED:
+        if bad in lowered:
+            return False, "That note contains something that isn’t allowed."
+    return True, ""
+
+
+def _fade_color(rgb: tuple[int, int, int], amount: float = 0.72) -> tuple[int, int, int]:
+    """Mix a color toward soft cream/white so text stays readable."""
+    # Target a warm off-white so it still feels like paper
+    target = (255, 252, 245)
+    return tuple(
+        int(c * (1 - amount) + t * amount)
+        for c, t in zip(rgb, target)
+    )
+
+
+# Cute animal + fruit emojis for the corner sticker
+STICKY_EMOJIS = [
+    "🦆", "🐸", "🦊", "🐰", "🐻", "🐼", "🐨", "🐯", "🦁", "🐮",
+    "🐷", "🐵", "🐔", "🐧", "🐦", "🐤", "🦉", "🦇", "🐺", "🐗",
+    "🐴", "🦄", "🐝", "🐛", "🦋", "🐌", "🐞", "🐜", "🐢", "🐍",
+    "🦎", "🐙", "🦑", "🦐", "🦞", "🦀", "🐡", "🐠", "🐟", "🐬",
+    "🐳", "🐋", "🦈", "🐊", "🐅", "🐆", "🦓", "🦍", "🐘", "🦛",
+    "🦏", "🐪", "🦒", "🦘", "🦬", "🐄", "🐎", "🐖", "🐏", "🐑",
+    "🦙", "🐐", "🦌", "🐕", "🐩", "🐈", "🦃", "🦚", "🦜", "🦢",
+    "🦩", "🐇", "🦝", "🦨", "🦡", "🦫", "🦦", "🦥", "🐁", "🐀",
+    "🐿", "🦔",
+    "🍎", "🍐", "🍊", "🍋", "🍌", "🍉", "🍇", "🍓", "🫐", "🍈",
+    "🍒", "🍑", "🥭", "🍍", "🥥", "🥝", "🍅", "🍆", "🥑", "🥦",
+    "🥒", "🌶", "🌽", "🥕", "🫒", "🧄", "🧅", "🥔", "🥐", "🥯",
+    "🍞", "🧀", "🥚", "🍳", "🥞", "🧇", "🥓", "🍗", "🌭", "🍔",
+    "🍟", "🍕", "🥪", "🌮", "🌯", "🥗", "🍝", "🍜", "🍲", "🍛",
+    "🍣", "🍱", "🥟", "🍤", "🍙", "🍚", "🍧", "🍨", "🍦", "🥧",
+    "🧁", "🍰", "🎂", "🍮", "🍭", "🍬", "🍫", "🍿", "🍩", "🍪",
+    "🌰", "🥜", "🍯", "☕", "🍵", "🧃", "🥤", "🧋", "🍺", "🍻",
+    "🥂", "🍷", "🧊",
+]
+
+
+def _render_emoji_sticker(emoji_char: str, size: int = 34) -> "Image.Image":
+    """Render a single emoji as a small transparent sticker."""
+    try:
+        font = ImageFont.truetype(
+            "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf", 109
+        )
+        canvas = Image.new("RGBA", (160, 160), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(canvas)
+        draw.text((10, 10), emoji_char, font=font, embedded_color=True)
+        bbox = canvas.getbbox()
+        if not bbox:
+            raise ValueError("empty emoji")
+        cropped = canvas.crop(bbox)
+        return cropped.resize((size, size), Image.Resampling.LANCZOS)
+    except Exception:
+        fallback = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        d = ImageDraw.Draw(fallback)
+        d.ellipse([2, 2, size - 3, size - 3], fill=(255, 255, 255, 200))
+        return fallback
+
+
+def create_sticky_note(
+    text: str,
+    author_name: str,
+    user_color: tuple[int, int, int] | None = None,
+) -> io.BytesIO:
+    """Generate a sticky-note image and return it as BytesIO."""
+    width, height = 420, 320
+
+    # Use the user's role color (faded) when available, otherwise a random pastel
+    if user_color and user_color != (0, 0, 0):
+        bg_color = _fade_color(user_color, amount=0.68)
+    else:
+        bg_color = random.choice(STICKY_COLORS)
+
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+
+    # Soft drop shadow
+    shadow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    shadow_draw = ImageDraw.Draw(shadow)
+    shadow_draw.rounded_rectangle(
+        [12, 14, width - 8, height - 6],
+        radius=8,
+        fill=(0, 0, 0, 50),
+    )
+    shadow = shadow.filter(ImageFilter.GaussianBlur(4))
+    img = Image.alpha_composite(img, shadow)
+
+    # Main sticky body
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle(
+        [8, 8, width - 16, height - 16],
+        radius=6,
+        fill=bg_color + (255,),
+    )
+
+    # Subtle top tape
+    tape_color = tuple(max(0, c - 30) for c in bg_color) + (210,)
+    draw.rectangle([width // 2 - 38, 5, width // 2 + 38, 17], fill=tape_color)
+
+    # Random animal / fruit emoji sticker in the top-right corner
+    emoji_char = random.choice(STICKY_EMOJIS)
+    sticker = _render_emoji_sticker(emoji_char, size=34)
+    # Nice padding from the edges so it sits on the paper
+    pad_right = 22
+    pad_top = 22
+    sx = width - 16 - pad_right - sticker.width
+    sy = 8 + pad_top
+    img.paste(sticker, (sx, sy), sticker)
+
+    # Load fonts
+    try:
+        font = ImageFont.truetype(STICKY_FONT_PATH, 26)
+        name_font = ImageFont.truetype(STICKY_NAME_FONT_PATH, 20)
+    except Exception:
+        font = ImageFont.load_default()
+        name_font = font
+
+    # Wrap + draw text (leave a little room on the right for the emoji)
+    wrapped = textwrap.fill(text.strip(), width=22)
+    draw.multiline_text(
+        (28, 36),
+        wrapped,
+        font=font,
+        fill=(40, 40, 40, 255),
+        spacing=10,
+    )
+
+    # Author signature
+    signature = f"— {author_name}"
+    bbox = draw.textbbox((0, 0), signature, font=name_font)
+    sig_width = bbox[2] - bbox[0]
+    draw.text(
+        (width - 28 - sig_width, height - 48),
+        signature,
+        font=name_font,
+        fill=(85, 85, 85, 255),
+    )
+
+    # Slight random rotation
+    angle = random.uniform(-3.5, 3.5)
+    img = img.rotate(angle, resample=Image.BICUBIC, expand=True)
+
+    # Keep full transparency — only the sticky note itself, no background
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG", optimize=True)
+    buffer.seek(0)
+    return buffer
+
+
+@tree.command(name="sticky", description="Leave a little sticky note for the pond. Costs 1 sticky.")
+@app_commands.describe(note="What do you want to write? (max 120 characters)")
+async def sticky(interaction: discord.Interaction, note: str):
+    """Post a handwritten sticky note image. Requires 1 sticky balance."""
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "❌ Sticky notes can only be used in a server.", ephemeral=True
+        )
+        return
+
+    guild_id = interaction.guild.id
+    user_id = interaction.user.id
+
+    # Require a configured sticky notes channel
+    settings = await get_guild_settings(guild_id)
+    sticky_channel_id = settings.get("sticky_channel_id")
+    if not sticky_channel_id:
+        await interaction.response.send_message(
+            "❌ No sticky notes channel is set yet.\n"
+            "-# An admin needs to set one in `/settings`.",
+            ephemeral=True,
+        )
+        return
+
+    sticky_channel = interaction.guild.get_channel(sticky_channel_id)
+    if sticky_channel is None or not isinstance(sticky_channel, discord.TextChannel):
+        await interaction.response.send_message(
+            "❌ The sticky notes channel no longer exists.\n"
+            "-# An admin needs to set a new one in `/settings`.",
+            ephemeral=True,
+        )
+        return
+
+    # Must have at least 1 sticky
+    balance = await get_sticky_balance(guild_id, user_id)
+    if balance < 1:
+        await interaction.response.send_message(
+            "❌ You don’t have any stickies left.\n"
+            "-# Win the daily crown to earn **+2** stickies.",
+            ephemeral=True,
+        )
+        return
+
+    # Moderation / length check
+    ok, reason = _sticky_is_clean(note)
+    if not ok:
+        await interaction.response.send_message(f"❌ {reason}", ephemeral=True)
+        return
+
+    # Spend one sticky first (prevents free notes on image failure)
+    spent = await spend_sticky(guild_id, user_id)
+    if not spent:
+        await interaction.response.send_message(
+            "❌ You don’t have any stickies left.",
+            ephemeral=True,
+        )
+        return
+
+    # Generate image
+    try:
+        display_name = interaction.user.display_name
+        if len(display_name) > 24:
+            display_name = display_name[:22] + "…"
+
+        user_color = None
+        if isinstance(interaction.user, discord.Member):
+            c = interaction.user.color
+            if c and c.value != 0:
+                user_color = c.to_rgb()
+
+        image_buffer = create_sticky_note(note, display_name, user_color=user_color)
+    except Exception as e:
+        log.error("Failed to generate sticky note: %s", e)
+        await add_stickies(guild_id, user_id, 1)  # refund
+        await interaction.response.send_message(
+            "❌ Something went wrong making your sticky note. Your sticky was refunded.",
+            ephemeral=True,
+        )
+        return
+
+    remaining = await get_sticky_balance(guild_id, user_id)
+    remaining_display = format_sticky_count(remaining)
+
+    file = discord.File(image_buffer, filename="sticky.png")
+
+    # Post the note in the dedicated channel
+    try:
+        await sticky_channel.send(file=file)
+    except Exception as e:
+        log.error("Failed to post sticky note to channel %s: %s", sticky_channel_id, e)
+        await add_stickies(guild_id, user_id, 1)  # refund
+        await interaction.response.send_message(
+            "❌ Couldn’t post to the sticky notes channel. Your sticky was refunded.",
+            ephemeral=True,
+        )
+        return
+
+    # Quiet confirmation to the user
+    await interaction.response.send_message(
+        f"✅ Sticky posted in {sticky_channel.mention}\n"
+        f"-# 📝 Stickies left: **{remaining_display}**",
+        ephemeral=True,
+    )
 
 
 # -----------------------------------------

@@ -2012,13 +2012,32 @@ def create_sticky_note(
         else:
             log.error("Still no sticky fonts. Dirs: %s", _sticky_font_search_dirs())
 
+    # Scale type size by message length — short notes read big, long notes stay readable
+    char_count = len(text.strip())
+    if char_count <= 20:
+        size_scale = 1.55
+        wrap_width = 14
+    elif char_count <= 40:
+        size_scale = 1.35
+        wrap_width = 16
+    elif char_count <= 70:
+        size_scale = 1.15
+        wrap_width = 18
+    elif char_count <= 100:
+        size_scale = 1.0
+        wrap_width = 20
+    else:
+        size_scale = 0.88
+        wrap_width = 22
+
     font = None
     name_font = None
     if STICKY_FONTS:
-        font_path, font_size = random.choice(STICKY_FONTS)
+        font_path, base_size = random.choice(STICKY_FONTS)
+        font_size = max(18, int(base_size * size_scale))
         try:
             font = ImageFont.truetype(font_path, font_size)
-            name_font = ImageFont.truetype(font_path, max(18, font_size - 6))
+            name_font = ImageFont.truetype(font_path, max(16, int(font_size * 0.7)))
         except Exception as e:
             log.warning("Failed to load font %s: %s", font_path, e)
 
@@ -2032,8 +2051,9 @@ def create_sticky_note(
                     continue
                 try:
                     p = os.path.join(d, fname)
-                    font = ImageFont.truetype(p, 28)
-                    name_font = ImageFont.truetype(p, 20)
+                    font_size = max(18, int(28 * size_scale))
+                    font = ImageFont.truetype(p, font_size)
+                    name_font = ImageFont.truetype(p, max(16, int(font_size * 0.7)))
                     log.info("Using discovered font: %s", p)
                     break
                 except Exception:
@@ -2046,7 +2066,7 @@ def create_sticky_note(
         font = ImageFont.load_default()
         name_font = font
 
-    wrapped = textwrap.fill(text.strip(), width=20)
+    wrapped = textwrap.fill(text.strip(), width=wrap_width)
     # Sanitize display name: strip custom emoji codes and unpaired surrogates
     clean_name = _CUSTOM_EMOJI_RE.sub("", author_name)
     clean_name = "".join(ch for ch in clean_name if ch.isprintable() or ch.isspace()).strip()

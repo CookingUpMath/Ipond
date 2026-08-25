@@ -1742,6 +1742,7 @@ async def on_ready():
 # -----------------------------------------
 
 STICKY_MAX_CHARS = 120
+STICKY_MIN_CHARS = 4
 
 # Very basic blocklist — expand as needed
 STICKY_BLOCKED = {
@@ -1749,46 +1750,52 @@ STICKY_BLOCKED = {
     "nigger", "faggot", "retard",  # hard blocked slurs
 }
 
-# Soft pastel sticky colors (R, G, B)
-STICKY_COLORS = [
-    (255, 249, 196),  # soft yellow
-    (255, 224, 230),  # soft pink
-    (220, 237, 255),  # soft blue
-    (232, 245, 233),  # soft green
-    (255, 236, 210),  # soft peach
-    (237, 231, 246),  # soft lavender
-    (255, 243, 224),  # warm cream
-]
 
-# Handwriting font
-STICKY_FONT_PATH = "/usr/share/fonts/SlidesCarnival/google/Patrick Hand/PatrickHand-Regular.ttf"
-STICKY_NAME_FONT_PATH = STICKY_FONT_PATH
+# Handwriting fonts — one is chosen at random per sticky
+# (size tuned per face so they look similar on the note)
+STICKY_FONTS = [
+    ("/usr/share/fonts/SlidesCarnival/google/Patrick Hand/PatrickHand-Regular.ttf", 26),
+    ("/usr/share/fonts/SlidesCarnival/google/Caveat/static/Caveat-Regular.ttf", 30),
+    ("/usr/share/fonts/SlidesCarnival/google/Handlee/Handlee-Regular.ttf", 26),
+    ("/usr/share/fonts/SlidesCarnival/google/Kalam/Kalam-Regular.ttf", 24),
+    ("/usr/share/fonts/SlidesCarnival/google/Gochi Hand/GochiHand-Regular.ttf", 26),
+    ("/usr/share/fonts/SlidesCarnival/google/Shadows Into Light/ShadowsIntoLight-Regular.ttf", 28),
+    ("/usr/share/fonts/SlidesCarnival/google/Gloria Hallelujah/GloriaHallelujah-Regular.ttf", 24),
+    ("/usr/share/fonts/SlidesCarnival/google/Homemade Apple/HomemadeApple-Regular.ttf", 22),
+    ("/usr/share/fonts/SlidesCarnival/google/Amatic SC/AmaticSC-Regular.ttf", 32),
+    ("/usr/share/fonts/SlidesCarnival/google/Permanent Marker/PermanentMarker-Regular.ttf", 22),
+]
+STICKY_FONT_FALLBACK = STICKY_FONTS[0][0]
 
 
 def _sticky_is_clean(text: str) -> tuple[bool, str]:
     """Basic moderation check. Returns (ok, reason)."""
-    lowered = text.lower().strip()
-    if not lowered:
+    stripped = text.strip()
+    if not stripped:
         return False, "Note cannot be empty."
+    if len(stripped) < STICKY_MIN_CHARS:
+        return False, f"Note is too short (min {STICKY_MIN_CHARS} characters)."
     if len(text) > STICKY_MAX_CHARS:
         return False, f"Note is too long (max {STICKY_MAX_CHARS} characters)."
+    lowered = stripped.lower()
     for bad in STICKY_BLOCKED:
         if bad in lowered:
             return False, "That note contains something that isn’t allowed."
     return True, ""
 
 
-def _fade_color(rgb: tuple[int, int, int], amount: float = 0.72) -> tuple[int, int, int]:
-    """Mix a color toward soft cream/white so text stays readable."""
-    # Target a warm off-white so it still feels like paper
-    target = (255, 252, 245)
-    return tuple(
-        int(c * (1 - amount) + t * amount)
-        for c, t in zip(rgb, target)
-    )
+# Soft pastel fallbacks when user has no role color
+STICKY_COLORS = [
+    (255, 249, 196),
+    (255, 224, 230),
+    (220, 237, 255),
+    (232, 245, 233),
+    (255, 236, 210),
+    (237, 231, 246),
+    (255, 243, 224),
+]
 
-
-# Cute animal + fruit emojis for the corner sticker
+# Cute animal + fruit emojis for the corner
 STICKY_EMOJIS = [
     "🦆", "🐸", "🦊", "🐰", "🐻", "🐼", "🐨", "🐯", "🦁", "🐮",
     "🐷", "🐵", "🐔", "🐧", "🐦", "🐤", "🦉", "🦇", "🐺", "🐗",
@@ -1809,6 +1816,15 @@ STICKY_EMOJIS = [
     "🌰", "🥜", "🍯", "☕", "🍵", "🧃", "🥤", "🧋", "🍺", "🍻",
     "🥂", "🍷", "🧊",
 ]
+
+
+def _fade_color(rgb: tuple[int, int, int], amount: float = 0.68) -> tuple[int, int, int]:
+    """Mix a color toward soft cream so handwriting stays readable."""
+    target = (255, 252, 245)
+    return tuple(
+        int(c * (1 - amount) + t * amount)
+        for c, t in zip(rgb, target)
+    )
 
 
 def _render_emoji_sticker(emoji_char: str, size: int = 34) -> "Image.Image":
@@ -1837,10 +1853,10 @@ def create_sticky_note(
     author_name: str,
     user_color: tuple[int, int, int] | None = None,
 ) -> io.BytesIO:
-    """Generate a sticky-note image and return it as BytesIO."""
-    width, height = 420, 320
+    """Generate a square pastel sticky-note (transparent PNG)."""
+    # Classic square
+    width = height = 400
 
-    # Use the user's role color (faded) when available, otherwise a random pastel
     if user_color and user_color != (0, 0, 0):
         bg_color = _fade_color(user_color, amount=0.68)
     else:
@@ -1852,69 +1868,93 @@ def create_sticky_note(
     shadow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     shadow_draw = ImageDraw.Draw(shadow)
     shadow_draw.rounded_rectangle(
-        [12, 14, width - 8, height - 6],
-        radius=8,
+        [14, 16, width - 6, height - 6],
+        radius=10,
         fill=(0, 0, 0, 50),
     )
-    shadow = shadow.filter(ImageFilter.GaussianBlur(4))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(5))
     img = Image.alpha_composite(img, shadow)
 
-    # Main sticky body
+    # Main sticky body — subtle rounded corners (~8px)
     draw = ImageDraw.Draw(img)
     draw.rounded_rectangle(
-        [8, 8, width - 16, height - 16],
-        radius=6,
+        [8, 8, width - 14, height - 14],
+        radius=8,
         fill=bg_color + (255,),
     )
 
     # Subtle top tape
     tape_color = tuple(max(0, c - 30) for c in bg_color) + (210,)
-    draw.rectangle([width // 2 - 38, 5, width // 2 + 38, 17], fill=tape_color)
+    draw.rectangle(
+        [width // 2 - 40, 5, width // 2 + 40, 17],
+        fill=tape_color,
+    )
 
-    # Random animal / fruit emoji sticker in the top-right corner
+    # Random animal / fruit emoji in top-right
     emoji_char = random.choice(STICKY_EMOJIS)
-    sticker = _render_emoji_sticker(emoji_char, size=34)
-    # Nice padding from the edges so it sits on the paper
-    pad_right = 22
-    pad_top = 22
-    sx = width - 16 - pad_right - sticker.width
-    sy = 8 + pad_top
+    # Guard against the accidental "🧇" typo if present
+    if emoji_char == "🧇":
+        emoji_char = "🧇"
+    sticker = _render_emoji_sticker(emoji_char, size=36)
+    pad = 24
+    sx = width - 14 - pad - sticker.width
+    sy = 8 + pad
     img.paste(sticker, (sx, sy), sticker)
 
-    # Load fonts
+    # Random handwriting font
+    font_path, font_size = random.choice(STICKY_FONTS)
     try:
-        font = ImageFont.truetype(STICKY_FONT_PATH, 26)
-        name_font = ImageFont.truetype(STICKY_NAME_FONT_PATH, 20)
+        font = ImageFont.truetype(font_path, font_size)
+        name_font = ImageFont.truetype(font_path, max(16, font_size - 6))
     except Exception:
-        font = ImageFont.load_default()
-        name_font = font
+        try:
+            font = ImageFont.truetype(STICKY_FONT_FALLBACK, 26)
+            name_font = ImageFont.truetype(STICKY_FONT_FALLBACK, 20)
+        except Exception:
+            font = ImageFont.load_default()
+            name_font = font
 
-    # Wrap + draw text (leave a little room on the right for the emoji)
     wrapped = textwrap.fill(text.strip(), width=22)
-    draw.multiline_text(
-        (28, 36),
+    signature = f"— {author_name}"
+
+    # Draw text + signature on a separate layer so we can tilt them
+    # slightly (less than the whole-note rotation) for a natural look.
+    text_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    td = ImageDraw.Draw(text_layer)
+
+    text_x, text_y = 28, 40
+    td.multiline_text(
+        (text_x, text_y),
         wrapped,
         font=font,
         fill=(40, 40, 40, 255),
         spacing=10,
     )
 
-    # Author signature
-    signature = f"— {author_name}"
-    bbox = draw.textbbox((0, 0), signature, font=name_font)
-    sig_width = bbox[2] - bbox[0]
-    draw.text(
-        (width - 28 - sig_width, height - 48),
+    # Measure body text so the signature sits just under it
+    body_bbox = td.multiline_textbbox((text_x, text_y), wrapped, font=font, spacing=10)
+    sig_y = min(body_bbox[3] + 14, height - 50)
+    sig_bbox = td.textbbox((0, 0), signature, font=name_font)
+    sig_width = sig_bbox[2] - sig_bbox[0]
+    td.text(
+        (width - 28 - sig_width, sig_y),
         signature,
         font=name_font,
         fill=(85, 85, 85, 255),
     )
 
-    # Slight random rotation
+    # Slight text-only tilt (smaller than the note tilt)
+    text_angle = random.uniform(-1.8, 1.8)
+    text_layer = text_layer.rotate(
+        text_angle, resample=Image.BICUBIC, expand=False, center=(width // 2, height // 2)
+    )
+    img = Image.alpha_composite(img, text_layer)
+
+    # Whole-note tilt (a bit more than the text)
     angle = random.uniform(-3.5, 3.5)
     img = img.rotate(angle, resample=Image.BICUBIC, expand=True)
 
-    # Keep full transparency — only the sticky note itself, no background
+    # Transparent PNG — no background
     buffer = io.BytesIO()
     img.save(buffer, format="PNG", optimize=True)
     buffer.seek(0)

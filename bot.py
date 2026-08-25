@@ -1768,6 +1768,10 @@ STICKY_FONTS = [
 STICKY_FONT_FALLBACK = STICKY_FONTS[0][0]
 
 
+# Discord custom emoji: <:name:id> or <a:name:id>
+_CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:\d+>")
+
+
 def _sticky_is_clean(text: str) -> tuple[bool, str]:
     """Basic moderation check. Returns (ok, reason)."""
     stripped = text.strip()
@@ -1777,6 +1781,8 @@ def _sticky_is_clean(text: str) -> tuple[bool, str]:
         return False, f"Note is too short (min {STICKY_MIN_CHARS} characters)."
     if len(text) > STICKY_MAX_CHARS:
         return False, f"Note is too long (max {STICKY_MAX_CHARS} characters)."
+    if _CUSTOM_EMOJI_RE.search(stripped):
+        return False, "Custom emojis can’t be used on stickies — try normal text instead."
     lowered = stripped.lower()
     for bad in STICKY_BLOCKED:
         if bad in lowered:

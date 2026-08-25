@@ -1752,22 +1752,62 @@ STICKY_BLOCKED = {
 }
 
 
-# Handwriting fonts bundled with the bot (works on Railway / any host)
-# Paths are relative to this file's directory.
-_FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
-STICKY_FONTS = [
-    (os.path.join(_FONTS_DIR, "PatrickHand-Regular.ttf"), 28),
-    (os.path.join(_FONTS_DIR, "Caveat-Variable.ttf"), 32),
-    (os.path.join(_FONTS_DIR, "Handlee-Regular.ttf"), 28),
-    (os.path.join(_FONTS_DIR, "Kalam-Regular.ttf"), 26),
-    (os.path.join(_FONTS_DIR, "GochiHand-Regular.ttf"), 28),
-    (os.path.join(_FONTS_DIR, "ShadowsIntoLight-Regular.ttf"), 30),
-    (os.path.join(_FONTS_DIR, "GloriaHallelujah-Regular.ttf"), 26),
-    (os.path.join(_FONTS_DIR, "HomemadeApple-Regular.ttf"), 24),
-    (os.path.join(_FONTS_DIR, "AmaticSC-Regular.ttf"), 34),
-    (os.path.join(_FONTS_DIR, "PermanentMarker-Regular.ttf"), 24),
+# Handwriting font filenames — searched in several possible folders
+_STICKY_FONT_FILES = [
+    ("PatrickHand-Regular.ttf", 28),
+    ("Caveat-Variable.ttf", 32),
+    ("Handlee-Regular.ttf", 28),
+    ("Kalam-Regular.ttf", 26),
+    ("GochiHand-Regular.ttf", 28),
+    ("ShadowsIntoLight-Regular.ttf", 30),
+    ("GloriaHallelujah-Regular.ttf", 26),
+    ("HomemadeApple-Regular.ttf", 24),
+    ("AmaticSC-Regular.ttf", 34),
+    ("PermanentMarker-Regular.ttf", 24),
 ]
-STICKY_FONT_FALLBACK = os.path.join(_FONTS_DIR, "PatrickHand-Regular.ttf")
+
+
+def _sticky_font_search_dirs() -> list[str]:
+    """Possible locations for the fonts/ folder on different hosts."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    cwd = os.getcwd()
+    return [
+        os.path.join(here, "fonts"),
+        os.path.join(cwd, "fonts"),
+        os.path.join(here, "..", "fonts"),
+        "/app/fonts",
+        "/app/src/fonts",
+    ]
+
+
+def _resolve_sticky_fonts() -> list[tuple[str, int]]:
+    """Return (absolute_path, size) for fonts that actually exist on disk."""
+    found: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    for directory in _sticky_font_search_dirs():
+        if not os.path.isdir(directory):
+            continue
+        for filename, size in _STICKY_FONT_FILES:
+            path = os.path.abspath(os.path.join(directory, filename))
+            if path in seen or not os.path.isfile(path):
+                continue
+            found.append((path, size))
+            seen.add(path)
+    return found
+
+
+STICKY_FONTS: list[tuple[str, int]] = _resolve_sticky_fonts()
+if STICKY_FONTS:
+    log.info(
+        "Sticky fonts loaded (%d): %s",
+        len(STICKY_FONTS),
+        [os.path.basename(p) for p, _ in STICKY_FONTS],
+    )
+else:
+    log.warning(
+        "No sticky fonts found. Searched: %s",
+        _sticky_font_search_dirs(),
+    )
 
 
 
@@ -1928,21 +1968,58 @@ def create_sticky_note(
     sy = 10 + pad
     img.paste(sticker, (sx, sy), sticker)
 
-    # Random handwriting font (bundled)
-    font_path, font_size = random.choice(STICKY_FONTS)
-    try:
-        font = ImageFont.truetype(font_path, font_size)
-        name_font = ImageFont.truetype(font_path, max(18, font_size - 6))
-    except Exception:
+    # Random handwriting font (bundled) — re-scan if none were found at import
+    global STICKY_FONTS
+    if not STICKY_FONTS:
+        STICKY_FONTS = _resolve_sticky_fonts()
+        if STICKY_FONTS:
+            log.info("Sticky fonts found on retry: %s", [os.path.basename(p) for p, _ in STICKY_FONTS])
+        else:
+            log.error("Still no sticky fonts. Dirs: %s", _sticky_font_search_dirs())
+
+    font = None
+    name_font = None
+    if STICKY_FONTS:
+        font_path, font_size = random.choice(STICKY_FONTS)
         try:
-            font = ImageFont.truetype(STICKY_FONT_FALLBACK, 28)
-            name_font = ImageFont.truetype(STICKY_FONT_FALLBACK, 20)
-        except Exception:
-            font = ImageFont.load_default()
-            name_font = font
+            font = ImageFont.truetype(font_path, font_size)
+            name_font = ImageFont.truetype(font_path, max(18, font_size - 6))
+        except Exception as e:
+            log.warning("Failed to load font %s: %s", font_path, e)
+
+    if font is None:
+        # Last resort — try any .ttf in search dirs
+        for d in _sticky_font_search_dirs():
+            if not os.path.isdir(d):
+                continue
+            for fname in os.listdir(d):
+                if not fname.lower().endswith(".ttf"):
+                    continue
+                try:
+                    p = os.path.join(d, fname)
+                    font = ImageFont.truetype(p, 28)
+                    name_font = ImageFont.truetype(p, 20)
+                    log.info("Using discovered font: %s", p)
+                    break
+                except Exception:
+                    continue
+            if font is not None:
+                break
+
+    if font is None:
+        log.error("Using Pillow default font — handwriting fonts missing from deploy")
+        font = ImageFont.load_default()
+        name_font = font
 
     wrapped = textwrap.fill(text.strip(), width=20)
-    signature = f"— {author_name}"
+    # Sanitize display name: strip custom emoji codes and unpaired surrogates
+    clean_name = _CUSTOM_EMOJI_RE.sub("", author_name)
+    clean_name = "".join(ch for ch in clean_name if ch.isprintable() or ch.isspace()).strip()
+    if not clean_name:
+        clean_name = "anon"
+    if len(clean_name) > 24:
+        clean_name = clean_name[:22] + "…"
+    signature = f"— {clean_name}"
 
     # Text layer (slight independent tilt)
     text_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))

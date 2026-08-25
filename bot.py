@@ -67,6 +67,7 @@ async def init_db():
             announce_channel_id BIGINT,
             champion_vc_id BIGINT,
             sticky_channel_id BIGINT,
+            sticky_webhook_url TEXT,
             timezone_str TEXT DEFAULT 'EST',
             reset_hour INT DEFAULT 0,
             reset_minute INT DEFAULT 0,
@@ -78,10 +79,14 @@ async def init_db():
         );
         """)
 
-        # Ensure sticky_channel_id exists on older databases
+        # Ensure sticky columns exist on older databases
         await conn.execute("""
         ALTER TABLE guild_settings
         ADD COLUMN IF NOT EXISTS sticky_channel_id BIGINT;
+        """)
+        await conn.execute("""
+        ALTER TABLE guild_settings
+        ADD COLUMN IF NOT EXISTS sticky_webhook_url TEXT;
         """)
 
         # Daily message counts (now with last_message)
@@ -222,6 +227,7 @@ async def get_guild_settings(guild_id: int):
                 "announce_channel_id": None,
                 "champion_vc_id": None,
                 "sticky_channel_id": None,
+                "sticky_webhook_url": None,
                 "timezone_str": "EST",
                 "reset_hour": 0,
                 "reset_minute": 0,
@@ -1231,7 +1237,11 @@ async def build_settings_embed(guild_id: int) -> discord.Embed:
     role = f"<@&{role_id}>" if role_id else "Not set"
     announce = f"<#{settings['announce_channel_id']}>" if settings["announce_channel_id"] else "Not set"
     vc = f"<#{settings['champion_vc_id']}>" if settings["champion_vc_id"] else "Not set"
-    sticky = f"<#{settings['sticky_channel_id']}>" if settings.get("sticky_channel_id") else "Not set"
+    webhook = settings.get("sticky_webhook_url")
+    if webhook:
+        sticky = "Webhook set ✅"
+    else:
+        sticky = "Not set"
     champion = f"<@{settings['current_champion_id']}>" if settings["current_champion_id"] else "None"
 
     embed = discord.Embed(color=discord.Color.blue())
@@ -1240,7 +1250,7 @@ async def build_settings_embed(guild_id: int) -> discord.Embed:
         f"-# Champion Role: {role}\n"
         f"-# Announce Channel: {announce}\n"
         f"-# Champion VC: {vc}\n"
-        f"-# Sticky Notes Channel: {sticky}\n"
+        f"-# Sticky Webhook: {sticky}\n"
         f"-# Timezone: **{settings['timezone_str']}**\n"
         f"-# Reset Time: **{settings['reset_hour']:02d}:{settings['reset_minute']:02d}**\n"
         f"-# Current Champion: {champion}\n\n"
@@ -1316,6 +1326,43 @@ class ResetTimeModal(discord.ui.Modal, title="Edit Daily Reset Time"):
         await interaction.response.edit_message(embed=embed, view=self.parent_view)
 
 
+
+class StickyWebhookModal(discord.ui.Modal, title="Sticky Notes Webhook"):
+    webhook_input = discord.ui.TextInput(
+        label="Webhook URL",
+        placeholder="https://discord.com/api/webhooks/...",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=200,
+    )
+
+    def __init__(self, guild_id: int, parent_view: "SettingsView"):
+        super().__init__()
+        self.guild_id = guild_id
+        self.parent_view = parent_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        url = str(self.webhook_input).strip()
+        if not (
+            url.startswith("https://discord.com/api/webhooks/")
+            or url.startswith("https://discordapp.com/api/webhooks/")
+        ):
+            return await interaction.response.send_message(
+                "❌ That doesn’t look like a Discord webhook URL.",
+                ephemeral=True,
+            )
+
+        await ensure_db()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE guild_settings SET sticky_webhook_url = $1 WHERE guild_id = $2",
+                url, self.guild_id,
+            )
+
+        embed = await build_settings_embed(self.guild_id)
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
+
 class SettingsView(discord.ui.View):
     def __init__(self, guild_id: int):
         super().__init__(timeout=300)
@@ -1343,13 +1390,6 @@ class SettingsView(discord.ui.View):
         self.vc_select.callback = self.on_vc_select
         self.add_item(self.vc_select)
 
-        self.sticky_select = discord.ui.ChannelSelect(
-            placeholder="📝 Set Sticky Notes Channel",
-            channel_types=[discord.ChannelType.text],
-            min_values=1, max_values=1,
-        )
-        self.sticky_select.callback = self.on_sticky_select
-        self.add_item(self.sticky_select)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if not interaction.user.guild_permissions.administrator:
@@ -1394,15 +1434,6 @@ class SettingsView(discord.ui.View):
             )
         await self._refresh(interaction)
 
-    async def on_sticky_select(self, interaction: discord.Interaction):
-        channel = self.sticky_select.values[0]
-        await ensure_db()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE guild_settings SET sticky_channel_id = $1 WHERE guild_id = $2",
-                channel.id, self.guild_id
-            )
-        await self._refresh(interaction)
 
     @discord.ui.button(label="Edit Timezone", style=discord.ButtonStyle.secondary, emoji="⏰", row=4)
     async def edit_timezone_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1411,6 +1442,10 @@ class SettingsView(discord.ui.View):
     @discord.ui.button(label="Edit Reset Time", style=discord.ButtonStyle.secondary, emoji="⏳", row=4)
     async def edit_reset_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(ResetTimeModal(self.guild_id, self))
+
+    @discord.ui.button(label="Sticky Webhook", style=discord.ButtonStyle.secondary, emoji="📝", row=4)
+    async def sticky_webhook_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(StickyWebhookModal(self.guild_id, self))
 
 
 @tree.command(name="settings", description="View and edit the server's crown and kicker settings.")
@@ -2093,22 +2128,13 @@ async def sticky(interaction: discord.Interaction, note: str):
     guild_id = interaction.guild.id
     user_id = interaction.user.id
 
-    # Require a configured sticky notes channel
+    # Require a configured sticky webhook
     settings = await get_guild_settings(guild_id)
-    sticky_channel_id = settings.get("sticky_channel_id")
-    if not sticky_channel_id:
+    webhook_url = settings.get("sticky_webhook_url")
+    if not webhook_url:
         await interaction.response.send_message(
-            "❌ No sticky notes channel is set yet.\n"
-            "-# An admin needs to set one in `/settings`.",
-            ephemeral=True,
-        )
-        return
-
-    sticky_channel = interaction.guild.get_channel(sticky_channel_id)
-    if sticky_channel is None or not isinstance(sticky_channel, discord.TextChannel):
-        await interaction.response.send_message(
-            "❌ The sticky notes channel no longer exists.\n"
-            "-# An admin needs to set a new one in `/settings`.",
+            "❌ No sticky webhook is set yet.\n"
+            "-# An admin needs to set one in `/settings` → **Sticky Webhook**.",
             ephemeral=True,
         )
         return
@@ -2165,24 +2191,29 @@ async def sticky(interaction: discord.Interaction, note: str):
 
     file = discord.File(image_buffer, filename="sticky.png")
 
-    # Post the note in the dedicated channel
+    # Post via webhook (destination is wherever the webhook is configured)
     try:
-        await sticky_channel.send(file=file)
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            webhook = discord.Webhook.from_url(webhook_url, session=session)
+            # Use the webhook's own name/avatar (set in Discord), not the user's
+            await webhook.send(file=file, wait=True)
     except Exception as e:
-        log.error("Failed to post sticky note to channel %s: %s", sticky_channel_id, e)
+        log.error("Failed to post sticky via webhook: %s", e)
         await add_stickies(guild_id, user_id, 1)  # refund
         await interaction.response.send_message(
-            "❌ Couldn’t post to the sticky notes channel. Your sticky was refunded.",
+            "❌ Couldn’t post via the sticky webhook. Your sticky was refunded.\n"
+            "-# Check that the webhook URL is still valid in `/settings`.",
             ephemeral=True,
         )
         return
 
-    # Quiet confirmation to the user
     await interaction.response.send_message(
-        f"✅ Sticky posted in {sticky_channel.mention}\n"
+        f"✅ Sticky posted!\n"
         f"-# 📝 Stickies left: **{remaining_display}**",
         ephemeral=True,
     )
+
 
 
 # -----------------------------------------

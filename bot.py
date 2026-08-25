@@ -1751,21 +1751,23 @@ STICKY_BLOCKED = {
 }
 
 
-# Handwriting fonts — one is chosen at random per sticky
-# (size tuned per face so they look similar on the note)
+# Handwriting fonts bundled with the bot (works on Railway / any host)
+# Paths are relative to this file's directory.
+_FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 STICKY_FONTS = [
-    ("/usr/share/fonts/SlidesCarnival/google/Patrick Hand/PatrickHand-Regular.ttf", 26),
-    ("/usr/share/fonts/SlidesCarnival/google/Caveat/static/Caveat-Regular.ttf", 30),
-    ("/usr/share/fonts/SlidesCarnival/google/Handlee/Handlee-Regular.ttf", 26),
-    ("/usr/share/fonts/SlidesCarnival/google/Kalam/Kalam-Regular.ttf", 24),
-    ("/usr/share/fonts/SlidesCarnival/google/Gochi Hand/GochiHand-Regular.ttf", 26),
-    ("/usr/share/fonts/SlidesCarnival/google/Shadows Into Light/ShadowsIntoLight-Regular.ttf", 28),
-    ("/usr/share/fonts/SlidesCarnival/google/Gloria Hallelujah/GloriaHallelujah-Regular.ttf", 24),
-    ("/usr/share/fonts/SlidesCarnival/google/Homemade Apple/HomemadeApple-Regular.ttf", 22),
-    ("/usr/share/fonts/SlidesCarnival/google/Amatic SC/AmaticSC-Regular.ttf", 32),
-    ("/usr/share/fonts/SlidesCarnival/google/Permanent Marker/PermanentMarker-Regular.ttf", 22),
+    (os.path.join(_FONTS_DIR, "PatrickHand-Regular.ttf"), 28),
+    (os.path.join(_FONTS_DIR, "Caveat-Variable.ttf"), 32),
+    (os.path.join(_FONTS_DIR, "Handlee-Regular.ttf"), 28),
+    (os.path.join(_FONTS_DIR, "Kalam-Regular.ttf"), 26),
+    (os.path.join(_FONTS_DIR, "GochiHand-Regular.ttf"), 28),
+    (os.path.join(_FONTS_DIR, "ShadowsIntoLight-Regular.ttf"), 30),
+    (os.path.join(_FONTS_DIR, "GloriaHallelujah-Regular.ttf"), 26),
+    (os.path.join(_FONTS_DIR, "HomemadeApple-Regular.ttf"), 24),
+    (os.path.join(_FONTS_DIR, "AmaticSC-Regular.ttf"), 34),
+    (os.path.join(_FONTS_DIR, "PermanentMarker-Regular.ttf"), 24),
 ]
-STICKY_FONT_FALLBACK = STICKY_FONTS[0][0]
+STICKY_FONT_FALLBACK = os.path.join(_FONTS_DIR, "PatrickHand-Regular.ttf")
+
 
 
 # Discord custom emoji: <:name:id> or <a:name:id>
@@ -1833,25 +1835,36 @@ def _fade_color(rgb: tuple[int, int, int], amount: float = 0.68) -> tuple[int, i
     )
 
 
-def _render_emoji_sticker(emoji_char: str, size: int = 34) -> "Image.Image":
+def _render_emoji_sticker(emoji_char: str, size: int = 36) -> "Image.Image":
     """Render a single emoji as a small transparent sticker."""
-    try:
-        font = ImageFont.truetype(
-            "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf", 109
-        )
-        canvas = Image.new("RGBA", (160, 160), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(canvas)
-        draw.text((10, 10), emoji_char, font=font, embedded_color=True)
-        bbox = canvas.getbbox()
-        if not bbox:
-            raise ValueError("empty emoji")
-        cropped = canvas.crop(bbox)
-        return cropped.resize((size, size), Image.Resampling.LANCZOS)
-    except Exception:
-        fallback = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        d = ImageDraw.Draw(fallback)
-        d.ellipse([2, 2, size - 3, size - 3], fill=(255, 255, 255, 200))
-        return fallback
+    emoji_font_candidates = [
+        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/truetype/NotoColorEmoji.ttf",
+        os.path.join(_FONTS_DIR, "NotoColorEmoji.ttf"),
+    ]
+    for fpath in emoji_font_candidates:
+        if not os.path.isfile(fpath):
+            continue
+        try:
+            font = ImageFont.truetype(fpath, 109)
+            canvas = Image.new("RGBA", (160, 160), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(canvas)
+            draw.text((10, 10), emoji_char, font=font, embedded_color=True)
+            bbox = canvas.getbbox()
+            if not bbox:
+                continue
+            cropped = canvas.crop(bbox)
+            return cropped.resize((size, size), Image.Resampling.LANCZOS)
+        except Exception:
+            continue
+
+    # Fallback: soft pastel circle (no broken grey / text)
+    fallback = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(fallback)
+    d.ellipse([1, 1, size - 2, size - 2], fill=(255, 255, 255, 160))
+    d.ellipse([4, 4, size - 5, size - 5], fill=(255, 200, 200, 200))
+    return fallback
 
 
 def create_sticky_note(
@@ -1860,8 +1873,7 @@ def create_sticky_note(
     user_color: tuple[int, int, int] | None = None,
 ) -> io.BytesIO:
     """Generate a square pastel sticky-note (transparent PNG)."""
-    # Classic square
-    width = height = 400
+    width = height = 420
 
     if user_color and user_color != (0, 0, 0):
         bg_color = _fade_color(user_color, amount=0.68)
@@ -1881,7 +1893,7 @@ def create_sticky_note(
     shadow = shadow.filter(ImageFilter.GaussianBlur(5))
     img = Image.alpha_composite(img, shadow)
 
-    # Main sticky body — subtle rounded corners (~8px)
+    # Main sticky body
     draw = ImageDraw.Draw(img)
     draw.rounded_rectangle(
         [8, 8, width - 14, height - 14],
@@ -1892,43 +1904,49 @@ def create_sticky_note(
     # Subtle top tape
     tape_color = tuple(max(0, c - 30) for c in bg_color) + (210,)
     draw.rectangle(
-        [width // 2 - 40, 5, width // 2 + 40, 17],
+        [width // 2 - 42, 6, width // 2 + 42, 18],
         fill=tape_color,
     )
 
     # Random animal / fruit emoji in top-right
     emoji_char = random.choice(STICKY_EMOJIS)
-    # Guard against the accidental "🧇" typo if present
-    if emoji_char == "🧇":
-        emoji_char = "🧇"
-    sticker = _render_emoji_sticker(emoji_char, size=36)
-    pad = 24
+    sticker = _render_emoji_sticker(emoji_char, size=38)
+    pad = 26
     sx = width - 14 - pad - sticker.width
-    sy = 8 + pad
+    sy = 10 + pad
     img.paste(sticker, (sx, sy), sticker)
 
-    # Random handwriting font
+    # Random handwriting font (bundled)
     font_path, font_size = random.choice(STICKY_FONTS)
     try:
         font = ImageFont.truetype(font_path, font_size)
-        name_font = ImageFont.truetype(font_path, max(16, font_size - 6))
+        name_font = ImageFont.truetype(font_path, max(18, font_size - 6))
     except Exception:
         try:
-            font = ImageFont.truetype(STICKY_FONT_FALLBACK, 26)
+            font = ImageFont.truetype(STICKY_FONT_FALLBACK, 28)
             name_font = ImageFont.truetype(STICKY_FONT_FALLBACK, 20)
         except Exception:
             font = ImageFont.load_default()
             name_font = font
 
-    wrapped = textwrap.fill(text.strip(), width=22)
+    wrapped = textwrap.fill(text.strip(), width=20)
     signature = f"— {author_name}"
 
-    # Draw text + signature on a separate layer so we can tilt them
-    # slightly (less than the whole-note rotation) for a natural look.
+    # Text layer (slight independent tilt)
     text_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     td = ImageDraw.Draw(text_layer)
 
-    text_x, text_y = 28, 40
+    # Measure text block for vertical centering in the upper-middle area
+    body_bbox = td.multiline_textbbox((0, 0), wrapped, font=font, spacing=10)
+    body_w = body_bbox[2] - body_bbox[0]
+    body_h = body_bbox[3] - body_bbox[1]
+
+    # Leave room for emoji on the right; center text block left-of-center
+    max_text_right = sx - 16
+    text_x = max(28, (max_text_right - body_w) // 2)
+    # Vertically: start in the upper half so it doesn't look stuck at the top
+    text_y = max(50, min(90, (height - body_h) // 3))
+
     td.multiline_text(
         (text_x, text_y),
         wrapped,
@@ -1937,30 +1955,36 @@ def create_sticky_note(
         spacing=10,
     )
 
-    # Measure body text so the signature sits just under it
-    body_bbox = td.multiline_textbbox((text_x, text_y), wrapped, font=font, spacing=10)
-    sig_y = min(body_bbox[3] + 14, height - 50)
+    # Signature centered under the body — reads as part of the quote
+    body_bbox2 = td.multiline_textbbox((text_x, text_y), wrapped, font=font, spacing=10)
     sig_bbox = td.textbbox((0, 0), signature, font=name_font)
-    sig_width = sig_bbox[2] - sig_bbox[0]
+    sig_w = sig_bbox[2] - sig_bbox[0]
+    # A little more space below the note so it feels attached, not floating
+    sig_y = body_bbox2[3] + 28
+    if sig_y + 28 > height - 24:
+        sig_y = height - 52
+    # Center under the text block (not the whole card)
+    body_center_x = (body_bbox2[0] + body_bbox2[2]) // 2
+    sig_x = body_center_x - sig_w // 2
+    # Keep a little margin from the edges
+    sig_x = max(24, min(sig_x, width - 24 - sig_w))
     td.text(
-        (width - 28 - sig_width, sig_y),
+        (sig_x, sig_y),
         signature,
         font=name_font,
         fill=(85, 85, 85, 255),
     )
 
-    # Slight text-only tilt (smaller than the note tilt)
-    text_angle = random.uniform(-1.8, 1.8)
+    text_angle = random.uniform(-1.6, 1.6)
     text_layer = text_layer.rotate(
         text_angle, resample=Image.BICUBIC, expand=False, center=(width // 2, height // 2)
     )
     img = Image.alpha_composite(img, text_layer)
 
-    # Whole-note tilt (a bit more than the text)
-    angle = random.uniform(-3.5, 3.5)
+    # Whole-note tilt
+    angle = random.uniform(-3.2, 3.2)
     img = img.rotate(angle, resample=Image.BICUBIC, expand=True)
 
-    # Transparent PNG — no background
     buffer = io.BytesIO()
     img.save(buffer, format="PNG", optimize=True)
     buffer.seek(0)

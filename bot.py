@@ -5,6 +5,7 @@ import logging
 import re
 import io
 import textwrap
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
@@ -1835,31 +1836,42 @@ def _fade_color(rgb: tuple[int, int, int], amount: float = 0.68) -> tuple[int, i
     )
 
 
-def _render_emoji_sticker(emoji_char: str, size: int = 36) -> "Image.Image":
-    """Render a single emoji as a small transparent sticker."""
-    emoji_font_candidates = [
-        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
-        "/usr/share/fonts/noto/NotoColorEmoji.ttf",
-        "/usr/share/fonts/truetype/NotoColorEmoji.ttf",
-        os.path.join(_FONTS_DIR, "NotoColorEmoji.ttf"),
-    ]
-    for fpath in emoji_font_candidates:
-        if not os.path.isfile(fpath):
-            continue
-        try:
-            font = ImageFont.truetype(fpath, 109)
-            canvas = Image.new("RGBA", (160, 160), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(canvas)
-            draw.text((10, 10), emoji_char, font=font, embedded_color=True)
-            bbox = canvas.getbbox()
-            if not bbox:
-                continue
-            cropped = canvas.crop(bbox)
-            return cropped.resize((size, size), Image.Resampling.LANCZOS)
-        except Exception:
-            continue
+# In-memory cache so the same emoji isn't re-downloaded every sticky
+_twemoji_cache: dict[str, bytes] = {}
 
-    # Fallback: soft pastel circle (no broken grey / text)
+
+def _emoji_to_twemoji_code(emoji_char: str) -> str:
+    """Convert an emoji character to a Twemoji filename code (e.g. 1f986)."""
+    # Drop variation selectors (U+FE0F) so Twemoji paths match
+    cps = [f"{ord(c):x}" for c in emoji_char if ord(c) != 0xFE0F]
+    return "-".join(cps)
+
+
+def _render_emoji_sticker(emoji_char: str, size: int = 36) -> "Image.Image":
+    """
+    Render a corner emoji using Twemoji PNGs from a CDN.
+    Works on Railway without bundling a color-emoji font.
+    """
+    code = _emoji_to_twemoji_code(emoji_char)
+    try:
+        if code not in _twemoji_cache:
+            url = (
+                "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/"
+                f"assets/72x72/{code}.png"
+            )
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "crown-bot-sticky/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                _twemoji_cache[code] = resp.read()
+
+        sticker = Image.open(io.BytesIO(_twemoji_cache[code])).convert("RGBA")
+        return sticker.resize((size, size), Image.Resampling.LANCZOS)
+    except Exception as e:
+        log.warning("Twemoji fetch failed for %s (%s): %s", emoji_char, code, e)
+
+    # Soft fallback circle if CDN is unreachable
     fallback = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(fallback)
     d.ellipse([1, 1, size - 2, size - 2], fill=(255, 255, 255, 160))

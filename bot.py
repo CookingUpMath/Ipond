@@ -198,6 +198,15 @@ async def init_db():
         );
         """)
 
+        # Ghost mode — admins hidden from crown / message counts
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS ghosted_users (
+            guild_id BIGINT,
+            user_id BIGINT,
+            PRIMARY KEY (guild_id, user_id)
+        );
+        """)
+
     log.info("Database initialized and tables ensured.")
 
 
@@ -288,15 +297,55 @@ async def reset_daily_counts(guild_id: int):
 
 
 async def get_top_user(guild_id: int):
+    """Top non-ghosted user by daily message count."""
     await ensure_db()
     async with pool.acquire() as conn:
         return await conn.fetchrow("""
-            SELECT user_id, count
-            FROM message_counts
-            WHERE guild_id = $1
-            ORDER BY count DESC
+            SELECT mc.user_id, mc.count
+            FROM message_counts mc
+            WHERE mc.guild_id = $1
+              AND NOT EXISTS (
+                  SELECT 1 FROM ghosted_users g
+                  WHERE g.guild_id = mc.guild_id AND g.user_id = mc.user_id
+              )
+            ORDER BY mc.count DESC
             LIMIT 1
         """, guild_id)
+
+
+# -----------------------------------------
+# GHOST MODE (admin — hidden from crown)
+# -----------------------------------------
+
+async def is_ghosted(guild_id: int, user_id: int) -> bool:
+    await ensure_db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT 1 FROM ghosted_users
+            WHERE guild_id = $1 AND user_id = $2
+        """, guild_id, user_id)
+    return row is not None
+
+
+async def set_ghosted(guild_id: int, user_id: int, enabled: bool):
+    await ensure_db()
+    async with pool.acquire() as conn:
+        if enabled:
+            await conn.execute("""
+                INSERT INTO ghosted_users (guild_id, user_id)
+                VALUES ($1, $2)
+                ON CONFLICT (guild_id, user_id) DO NOTHING
+            """, guild_id, user_id)
+            # Drop any existing daily count so leftover scores can't win the crown
+            await conn.execute("""
+                DELETE FROM message_counts
+                WHERE guild_id = $1 AND user_id = $2
+            """, guild_id, user_id)
+        else:
+            await conn.execute("""
+                DELETE FROM ghosted_users
+                WHERE guild_id = $1 AND user_id = $2
+            """, guild_id, user_id)
 
 
 # -----------------------------------------
@@ -635,10 +684,14 @@ async def leaderboard(interaction: discord.Interaction):
     await ensure_db()
     async with pool.acquire() as conn:
         daily_rows = await conn.fetch("""
-            SELECT user_id, count
-            FROM message_counts
-            WHERE guild_id = $1
-            ORDER BY count DESC
+            SELECT mc.user_id, mc.count
+            FROM message_counts mc
+            WHERE mc.guild_id = $1
+              AND NOT EXISTS (
+                  SELECT 1 FROM ghosted_users g
+                  WHERE g.guild_id = mc.guild_id AND g.user_id = mc.user_id
+              )
+            ORDER BY mc.count DESC
             LIMIT 10
         """, guild_id)
 
@@ -997,6 +1050,46 @@ def admin_only():
     async def predicate(interaction: discord.Interaction):
         return interaction.user.guild_permissions.administrator
     return app_commands.check(predicate)
+
+
+@tree.command(
+    name="ghost",
+    description="Toggle ghost mode (admin only).",
+)
+@app_commands.default_permissions(administrator=True)
+@admin_only()
+async def ghost(interaction: discord.Interaction):
+    """
+    Admin-only. When enabled for you:
+    - Your messages are not counted toward the daily leaderboard
+    - You cannot win the crown
+    Everything else (powers if champion already, stickies you already own, etc.) still works.
+    Responses are ephemeral so others don't see the toggle.
+    """
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "❌ Server only.", ephemeral=True
+        )
+        return
+
+    guild_id = interaction.guild.id
+    user_id = interaction.user.id
+    currently = await is_ghosted(guild_id, user_id)
+    await set_ghosted(guild_id, user_id, not currently)
+
+    if not currently:
+        await interaction.response.send_message(
+            "👻 **Ghost on** — your messages no longer count toward the crown, "
+            "and you can’t be crowned.\n"
+            "-# Only you can see this.",
+            ephemeral=True,
+        )
+    else:
+        await interaction.response.send_message(
+            "👁 **Ghost off** — your messages count for the crown again.\n"
+            "-# Only you can see this.",
+            ephemeral=True,
+        )
 
 
 @tree.command(name="reseteffects", description="Reset all crown effects or a specific user's effects.")
@@ -1540,7 +1633,9 @@ async def on_message(message: discord.Message):
 
     await ensure_db()
 
-    await increment_message_count(guild.id, message.author.id)
+    # Ghost mode: messages still work (effects, etc.) but don't count for the crown
+    if not await is_ghosted(guild.id, message.author.id):
+        await increment_message_count(guild.id, message.author.id)
 
     async with pool.acquire() as conn:
         effect = await conn.fetchrow("""

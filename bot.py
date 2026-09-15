@@ -1955,12 +1955,38 @@ def _sticky_is_clean(text: str) -> tuple[bool, str]:
     if len(text) > STICKY_MAX_CHARS:
         return False, f"Note is too long (max {STICKY_MAX_CHARS} characters)."
     if _CUSTOM_EMOJI_RE.search(stripped):
-        return False, "Custom emojis can’t be used on stickies — try normal text instead."
+        return False, "Custom emojis can’t go in the note text — use the emoji field for the corner sticker."
+    # Handwriting fonts don't render emoji — block any unicode emoji in the body
+    if emoji.emoji_list(stripped):
+        return False, "Emoji can’t go in the note text (fonts don’t support them). Put one default emoji in the Corner Emoji field instead."
     lowered = stripped.lower()
     for bad in STICKY_BLOCKED:
         if bad in lowered:
             return False, "That note contains something that isn’t allowed."
     return True, ""
+
+
+def _parse_corner_emoji(raw: str) -> tuple[str | None, str]:
+    """
+    Validate the corner emoji field.
+    Must be a single default (unicode) emoji — not custom Discord emoji, not plain text.
+    Returns (emoji_char, error_message).
+    """
+    stripped = (raw or "").strip()
+    if not stripped:
+        return None, "Add one default emoji for the corner (e.g. 🦆 or 🍓)."
+    if _CUSTOM_EMOJI_RE.search(stripped):
+        return None, "Custom server emojis can’t be used — paste a default emoji only (e.g. 🦆)."
+    found = emoji.emoji_list(stripped)
+    if not found:
+        return None, "That doesn’t look like a default emoji. Paste one like 🦆 or 🍓."
+    leftover = emoji.replace_emoji(stripped, replace="")
+    leftover = "".join(ch for ch in leftover if ord(ch) not in (0xFE0F, 0x200D)).strip()
+    if leftover:
+        return None, "Only paste a single default emoji in the Corner Emoji field — no extra text."
+    if len(found) > 1:
+        return None, "Only one emoji for the corner, please."
+    return found[0]["emoji"], ""
 
 
 # Soft pastel fallbacks when user has no role color
@@ -2053,6 +2079,7 @@ def create_sticky_note(
     text: str,
     author_name: str,
     user_color: tuple[int, int, int] | None = None,
+    corner_emoji: str | None = None,
 ) -> io.BytesIO:
     """Generate a square pastel sticky-note (transparent PNG)."""
     width = height = 420
@@ -2090,8 +2117,8 @@ def create_sticky_note(
         fill=tape_color,
     )
 
-    # Random animal / fruit emoji in top-right
-    emoji_char = random.choice(STICKY_EMOJIS)
+    # Corner emoji (user-picked, or random fallback)
+    emoji_char = corner_emoji or random.choice(STICKY_EMOJIS)
     sticker = _render_emoji_sticker(emoji_char, size=38)
     pad = 26
     sx = width - 14 - pad - sticker.width
@@ -2231,9 +2258,8 @@ def create_sticky_note(
 
 
 @tree.command(name="sticky", description="Leave a little sticky note for the pond. Costs 1 sticky.")
-@app_commands.describe(note="What do you want to write? (max 120 characters)")
-async def sticky(interaction: discord.Interaction, note: str):
-    """Post a handwritten sticky note image. Requires 1 sticky balance."""
+async def sticky(interaction: discord.Interaction):
+    """Open a form to write a sticky note. Costs 1 sticky on confirm."""
     if interaction.guild is None:
         await interaction.response.send_message(
             "❌ Sticky notes can only be used in a server.", ephemeral=True
@@ -2243,7 +2269,6 @@ async def sticky(interaction: discord.Interaction, note: str):
     guild_id = interaction.guild.id
     user_id = interaction.user.id
 
-    # Require a configured sticky webhook
     settings = await get_guild_settings(guild_id)
     webhook_url = settings.get("sticky_webhook_url")
     if not webhook_url:
@@ -2254,7 +2279,6 @@ async def sticky(interaction: discord.Interaction, note: str):
         )
         return
 
-    # Must have at least 1 sticky
     balance = await get_sticky_balance(guild_id, user_id)
     if balance < 1:
         await interaction.response.send_message(
@@ -2264,71 +2288,189 @@ async def sticky(interaction: discord.Interaction, note: str):
         )
         return
 
-    # Moderation / length check
-    ok, reason = _sticky_is_clean(note)
-    if not ok:
-        await interaction.response.send_message(f"❌ {reason}", ephemeral=True)
-        return
+    await interaction.response.send_modal(StickyNoteModal(guild_id, user_id, webhook_url))
 
-    # Spend one sticky first (prevents free notes on image failure)
-    spent = await spend_sticky(guild_id, user_id)
-    if not spent:
-        await interaction.response.send_message(
-            "❌ You don’t have any stickies left.",
-            ephemeral=True,
-        )
-        return
 
-    # Generate image
-    try:
-        display_name = interaction.user.display_name
-        if len(display_name) > 24:
-            display_name = display_name[:22] + "…"
-
-        user_color = None
-        if isinstance(interaction.user, discord.Member):
-            c = interaction.user.color
-            if c and c.value != 0:
-                user_color = c.to_rgb()
-
-        image_buffer = create_sticky_note(note, display_name, user_color=user_color)
-    except Exception as e:
-        log.error("Failed to generate sticky note: %s", e)
-        await add_stickies(guild_id, user_id, 1)  # refund
-        await interaction.response.send_message(
-            "❌ Something went wrong making your sticky note. Your sticky was refunded.",
-            ephemeral=True,
-        )
-        return
-
-    remaining = await get_sticky_balance(guild_id, user_id)
-    remaining_display = format_sticky_count(remaining)
-
-    file = discord.File(image_buffer, filename="sticky.png")
-
-    # Post via webhook (destination is wherever the webhook is configured)
-    try:
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            webhook = discord.Webhook.from_url(webhook_url, session=session)
-            # Use the webhook's own name/avatar (set in Discord), not the user's
-            await webhook.send(file=file, wait=True)
-    except Exception as e:
-        log.error("Failed to post sticky via webhook: %s", e)
-        await add_stickies(guild_id, user_id, 1)  # refund
-        await interaction.response.send_message(
-            "❌ Couldn’t post via the sticky webhook. Your sticky was refunded.\n"
-            "-# Check that the webhook URL is still valid in `/settings`.",
-            ephemeral=True,
-        )
-        return
-
-    await interaction.response.send_message(
-        f"✅ Sticky posted!\n"
-        f"-# 📝 Stickies left: **{remaining_display}**",
-        ephemeral=True,
+class StickyNoteModal(discord.ui.Modal, title="Write a Sticky Note"):
+    note_input = discord.ui.TextInput(
+        label="Your note",
+        placeholder="No emoji in this box — text only (4–120 characters)",
+        style=discord.TextStyle.paragraph,
+        min_length=STICKY_MIN_CHARS,
+        max_length=STICKY_MAX_CHARS,
+        required=True,
+    )
+    emoji_input = discord.ui.TextInput(
+        label="Corner emoji",
+        placeholder="Paste one default emoji only (e.g. 🦆 or 🍓)",
+        style=discord.TextStyle.short,
+        max_length=32,
+        required=True,
     )
 
+    def __init__(self, guild_id: int, user_id: int, webhook_url: str):
+        super().__init__()
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.webhook_url = webhook_url
+
+    async def on_submit(self, interaction: discord.Interaction):
+        note = str(self.note_input)
+        corner_raw = str(self.emoji_input)
+
+        ok, reason = _sticky_is_clean(note)
+        if not ok:
+            await interaction.response.send_message(f"❌ {reason}", ephemeral=True)
+            return
+
+        corner, err = _parse_corner_emoji(corner_raw)
+        if not corner:
+            await interaction.response.send_message(f"❌ {err}", ephemeral=True)
+            return
+
+        # Confirm step — no sticky spent until they agree
+        preview = note.strip()
+        if len(preview) > 200:
+            preview = preview[:197] + "…"
+
+        view = StickyConfirmView(
+            guild_id=self.guild_id,
+            user_id=self.user_id,
+            webhook_url=self.webhook_url,
+            note=note.strip(),
+            corner_emoji=corner,
+        )
+        await interaction.response.send_message(
+            f"**Preview your sticky** (costs **1** sticky if you post)\n\n"
+            f"{corner}  {preview}\n\n"
+            f"-# Look good? Confirm to post, or cancel to keep your sticky.",
+            view=view,
+            ephemeral=True,
+        )
+
+
+class StickyConfirmView(discord.ui.View):
+    def __init__(
+        self,
+        guild_id: int,
+        user_id: int,
+        webhook_url: str,
+        note: str,
+        corner_emoji: str,
+    ):
+        super().__init__(timeout=120)
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.webhook_url = webhook_url
+        self.note = note
+        self.corner_emoji = corner_emoji
+        self._used = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "❌ This confirmation isn’t for you.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Post sticky", style=discord.ButtonStyle.success, emoji="✅")
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self._used:
+            await interaction.response.send_message("❌ Already handled.", ephemeral=True)
+            return
+        self._used = True
+        for child in self.children:
+            child.disabled = True
+
+        # Re-check balance at confirm time
+        balance = await get_sticky_balance(self.guild_id, self.user_id)
+        if balance < 1:
+            await interaction.response.edit_message(
+                content="❌ You don’t have any stickies left anymore.",
+                view=self,
+            )
+            return
+
+        spent = await spend_sticky(self.guild_id, self.user_id)
+        if not spent:
+            await interaction.response.edit_message(
+                content="❌ You don’t have any stickies left.",
+                view=self,
+            )
+            return
+
+        try:
+            display_name = interaction.user.display_name
+            if len(display_name) > 24:
+                display_name = display_name[:22] + "…"
+
+            user_color = None
+            if isinstance(interaction.user, discord.Member):
+                c = interaction.user.color
+                if c and c.value != 0:
+                    user_color = c.to_rgb()
+
+            image_buffer = create_sticky_note(
+                self.note,
+                display_name,
+                user_color=user_color,
+                corner_emoji=self.corner_emoji,
+            )
+        except Exception as e:
+            log.error("Failed to generate sticky note: %s", e)
+            await add_stickies(self.guild_id, self.user_id, 1)
+            await interaction.response.edit_message(
+                content="❌ Something went wrong making your sticky note. Your sticky was refunded.",
+                view=self,
+            )
+            return
+
+        file = discord.File(image_buffer, filename="sticky.png")
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                webhook = discord.Webhook.from_url(self.webhook_url, session=session)
+                await webhook.send(file=file, wait=True)
+        except Exception as e:
+            log.error("Failed to post sticky via webhook: %s", e)
+            await add_stickies(self.guild_id, self.user_id, 1)
+            await interaction.response.edit_message(
+                content=(
+                    "❌ Couldn’t post via the sticky webhook. Your sticky was refunded.\n"
+                    "-# Check that the webhook URL is still valid in `/settings`."
+                ),
+                view=self,
+            )
+            return
+
+        remaining = await get_sticky_balance(self.guild_id, self.user_id)
+        remaining_display = format_sticky_count(remaining)
+        await interaction.response.edit_message(
+            content=(
+                f"✅ Sticky posted!\n"
+                f"-# 📝 Stickies left: **{remaining_display}**"
+            ),
+            view=self,
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="✖️")
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self._used:
+            await interaction.response.send_message("❌ Already handled.", ephemeral=True)
+            return
+        self._used = True
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content="❎ Cancelled — no sticky was spent.",
+            view=self,
+        )
+
+    async def on_timeout(self):
+        self._used = True
+        for child in self.children:
+            child.disabled = True
 
 
 # -----------------------------------------

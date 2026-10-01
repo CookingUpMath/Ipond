@@ -1283,8 +1283,9 @@ async def cringe(interaction: discord.Interaction, member: discord.Member):
     end_local = reset_time - timedelta(minutes=5)
     until_utc = end_local.astimezone(timezone.utc)
 
-    # Save current nick (None if they only use username)
+    # Save identity before the nick swap
     original_nick = member.nick
+    old_display = member.display_name
     cringe_nick = _clamp_nick(random.choice(CRINGE_NAMES))
 
     try:
@@ -1314,7 +1315,7 @@ async def cringe(interaction: discord.Interaction, member: discord.Member):
         "# \u2728 Cringe Applied\n"
         "-# Duration: Until 5 minutes before daily reset\n"
         "-# Effect: Forced Halloween nickname (re-applies if they change it)\n\n"
-        f"**{member.mention}** is now **{cringe_nick}**\n"
+        f"**{old_display}** is now {member.mention}\n"
         f"-# Cringe uses left today: **{uses_left}**"
     )
     await interaction.response.send_message(embed=embed)

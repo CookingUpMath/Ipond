@@ -169,8 +169,14 @@ async def init_db():
             curse_used_today BOOLEAN DEFAULT FALSE,
             mime_used_today BOOLEAN DEFAULT FALSE,
             jester_used_today BOOLEAN DEFAULT FALSE,
+            cringe_uses_today INT DEFAULT 0,
             PRIMARY KEY (guild_id, user_id)
         );
+        """)
+
+        await conn.execute("""
+        ALTER TABLE daily_power_usage
+        ADD COLUMN IF NOT EXISTS cringe_uses_today INT DEFAULT 0;
         """)
 
         # D_ZLove total tracker
@@ -205,6 +211,28 @@ async def init_db():
             user_id BIGINT,
             PRIMARY KEY (guild_id, user_id)
         );
+        """)
+
+        # Cringe power — forced Halloween nicknames
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS cringe_effects (
+            guild_id BIGINT,
+            user_id BIGINT,
+            original_nick TEXT,
+            cringe_nick TEXT NOT NULL,
+            until_ts TIMESTAMP NOT NULL,
+            PRIMARY KEY (guild_id, user_id)
+        );
+        """)
+
+        # Optional all-time cringe cast/victim counters
+        await conn.execute("""
+        ALTER TABLE crown_uses
+        ADD COLUMN IF NOT EXISTS cringe_used BIGINT DEFAULT 0;
+        """)
+        await conn.execute("""
+        ALTER TABLE victim_stats
+        ADD COLUMN IF NOT EXISTS cringed BIGINT DEFAULT 0;
         """)
 
     log.info("Database initialized and tables ensured.")
@@ -404,7 +432,8 @@ async def increment_crown_use(guild_id: int, user_id: int, power: str):
     col = {
         "curse": "curse_used",
         "mime": "mime_used",
-        "jester": "jester_used"
+        "jester": "jester_used",
+        "cringe": "cringe_used",
     }.get(power)
     if not col:
         return
@@ -423,7 +452,8 @@ async def increment_victim_stat(guild_id: int, user_id: int, power: str):
     col = {
         "curse": "cursed",
         "mime": "mimed",
-        "jester": "jestered"
+        "jester": "jestered",
+        "cringe": "cringed",
     }.get(power)
     if not col:
         return
@@ -640,6 +670,21 @@ async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: dat
             except Exception as e:
                 log.warning("Failed to clean jester nick for %s: %s", member.id, e)
 
+    # Clear all cringe effects and restore original nicks
+    await ensure_db()
+    async with pool.acquire() as conn:
+        cringe_rows = await conn.fetch("""
+            SELECT user_id, original_nick FROM cringe_effects
+            WHERE guild_id = $1
+        """, guild.id)
+        await conn.execute(
+            "DELETE FROM cringe_effects WHERE guild_id = $1", guild.id
+        )
+    for row in cringe_rows:
+        member = guild.get_member(row["user_id"])
+        if member:
+            await restore_cringe_nick(member, row["original_nick"])
+
 
 @tasks.loop(minutes=1)
 async def daily_reset_loop():
@@ -789,7 +834,7 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
     # Casted stats
     async with pool.acquire() as conn:
         uses = await conn.fetchrow("""
-            SELECT curse_used, mime_used, jester_used
+            SELECT curse_used, mime_used, jester_used, cringe_used
             FROM crown_uses
             WHERE guild_id = $1 AND user_id = $2
         """, guild_id, user_id)
@@ -797,11 +842,12 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
     curse_casted = uses["curse_used"] if uses else 0
     mime_casted = uses["mime_used"] if uses else 0
     jester_casted = uses["jester_used"] if uses else 0
+    cringe_casted = (uses["cringe_used"] if uses and uses["cringe_used"] is not None else 0)
 
     # Received stats
     async with pool.acquire() as conn:
         victim = await conn.fetchrow("""
-            SELECT cursed, mimed, jestered
+            SELECT cursed, mimed, jestered, cringed
             FROM victim_stats
             WHERE guild_id = $1 AND user_id = $2
         """, guild_id, user_id)
@@ -809,8 +855,9 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
     cursed_on = victim["cursed"] if victim else 0
     mimed_on = victim["mimed"] if victim else 0
     jestered_on = victim["jestered"] if victim else 0
+    cringed_on = (victim["cringed"] if victim and victim["cringed"] is not None else 0)
 
-    total_casted = curse_casted + mime_casted + jester_casted
+    total_casted = curse_casted + mime_casted + jester_casted + cringe_casted
 
     user_color = user.color if user.color.value != 0 else discord.Color.blurple()
 
@@ -826,12 +873,152 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
         f"## ⚡️ Royal Powers\n"
         f"-# 🙊 Mime: **{mime_casted} | {mimed_on}**\n"
         f"-# 🤡 Jester: **{jester_casted} | {jestered_on}**\n"
-        f"-# 🔮 Curse: **{curse_casted} | {cursed_on}**"
+        f"-# 🔮 Curse: **{curse_casted} | {cursed_on}**\n"
+        f"-# ✨ Cringe: **{cringe_casted} | {cringed_on}**"
     )
 
     embed.set_footer(text="⚠️ Stats are Sent | Received")
 
     await interaction.response.send_message(embed=embed)
+
+
+# -----------------------------------------
+# /cringe — HALLOWEEN NICKNAMES (3 / day)
+# -----------------------------------------
+
+CRINGE_MAX_USES = 3
+
+CRINGE_NAMES = [
+    "XxSp00kyKingxX",
+    "~*DarkQuack*~",
+    "♕NightBaddie♕",
+    "✨B00tyWitch✨",
+    "XxNotAVampirexX",
+    "💀xXBoneDaddyXx💀",
+    "☆ShadowMuffin☆",
+    "✨HexBabe✨",
+    "XxBloodAngelxX",
+    "🌙~MoonGoblin~🌙",
+    "🔥LilHellfire🔥",
+    "♱SaintOfSin♱",
+    "✨GhostieBoo✨",
+    "XxCursedCutiexX",
+    "🕸WebQueen🕸",
+    "🦇BatBoyUwU🦇",
+    "💜DarkSoul69💜",
+    "~*PumpkinSpiceSatan*~",
+    "✨UwUReaper✨",
+    "XxD3m0nSl4y3rxX",
+    "🎃GourdGoddess🎃",
+    "☆BooThang☆",
+    "💀xSkullyBabeXx",
+    "✨CryptCutie✨",
+    "🔮WitchTok🔮",
+    "XxMainCharacterGhostxX",
+    "🌙SoftGoth🌙",
+    "🔥HellYeahBabe🔥",
+    "✨NotLikeOtherSpooks✨",
+    "♕QueenOfTheDamnedLite♕",
+    "🦇xxBatkissxx🦇",
+    "💀DaddyDeath💀",
+    "✨LilHexBug✨",
+    "~*EmoFog*~",
+    "🕸xSpiderBaeXx",
+    "👻BooBae👻",
+    "✨DarkAuraOnly✨",
+    "XxVoidPrincexX",
+    "🎃SpiceAndEvil🎃",
+    "💜SadBatEnergy💜",
+    "✨CertifiedFangs✨",
+    "☆CreepyCute☆",
+    "🧙WitchPleaseXx",
+    "💀xXDeadInsidexX💀",
+    "✨SoulSnatcherUwU✨",
+    "🦇NightTerrorJr🦇",
+    "🔥XxBurnNoticeXx🔥",
+    "🌙HexyBaby🌙",
+    "✨GhostWithTheMost✨",
+    "♕LilLich♕",
+]
+
+
+def _clamp_nick(name: str) -> str:
+    """Discord nicknames max out at 32 characters."""
+    if len(name) <= 32:
+        return name
+    return name[:32]
+
+
+async def get_cringe_uses_today(guild_id: int, user_id: int) -> int:
+    await ensure_db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT cringe_uses_today FROM daily_power_usage
+            WHERE guild_id = $1 AND user_id = $2
+        """, guild_id, user_id)
+    return int(row["cringe_uses_today"]) if row and row["cringe_uses_today"] is not None else 0
+
+
+async def mark_cringe_used(guild_id: int, user_id: int) -> int:
+    """Increment cringe uses; returns new count."""
+    await ensure_db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO daily_power_usage (guild_id, user_id, cringe_uses_today)
+            VALUES ($1, $2, 1)
+            ON CONFLICT (guild_id, user_id)
+            DO UPDATE SET cringe_uses_today = COALESCE(daily_power_usage.cringe_uses_today, 0) + 1
+            RETURNING cringe_uses_today
+        """, guild_id, user_id)
+    return int(row["cringe_uses_today"])
+
+
+async def set_cringe_effect(
+    guild_id: int,
+    user_id: int,
+    original_nick: str | None,
+    cringe_nick: str,
+    until_utc: datetime,
+):
+    await ensure_db()
+    naive_until = to_naive_utc(until_utc)
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO cringe_effects (guild_id, user_id, original_nick, cringe_nick, until_ts)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (guild_id, user_id)
+            DO UPDATE SET
+                original_nick = EXCLUDED.original_nick,
+                cringe_nick = EXCLUDED.cringe_nick,
+                until_ts = EXCLUDED.until_ts
+        """, guild_id, user_id, original_nick, cringe_nick, naive_until)
+
+
+async def get_cringe_effect(guild_id: int, user_id: int):
+    await ensure_db()
+    async with pool.acquire() as conn:
+        return await conn.fetchrow("""
+            SELECT original_nick, cringe_nick, until_ts
+            FROM cringe_effects
+            WHERE guild_id = $1 AND user_id = $2
+        """, guild_id, user_id)
+
+
+async def clear_cringe_effect(guild_id: int, user_id: int):
+    await ensure_db()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            DELETE FROM cringe_effects
+            WHERE guild_id = $1 AND user_id = $2
+        """, guild_id, user_id)
+
+
+async def restore_cringe_nick(member: discord.Member, original_nick: str | None):
+    """Restore pre-cringe nickname (None clears nick)."""
+    try:
+        await member.edit(nick=original_nick)
+    except Exception as e:
+        log.warning("Failed to restore nick for %s: %s", member.id, e)
 
 
 # -----------------------------------------
@@ -1043,6 +1230,97 @@ async def jester(interaction: discord.Interaction, member: discord.Member):
 
 
 # -----------------------------------------
+# /cringe — 3 USES PER RESET
+# -----------------------------------------
+
+@tree.command(
+    name="cringe",
+    description="Force a painfully cringe Halloween nickname until near daily reset. (3 uses/day)",
+)
+async def cringe(interaction: discord.Interaction, member: discord.Member):
+    if not await ensure_champion_role_holder(interaction):
+        return
+
+    guild = interaction.guild
+    guild_id = guild.id
+    user_id = interaction.user.id
+
+    if member.bot:
+        await interaction.response.send_message("❌ You can’t cringe a bot.", ephemeral=True)
+        return
+
+    if member.id == guild.owner_id:
+        await interaction.response.send_message("❌ You can’t cringe the server owner.", ephemeral=True)
+        return
+
+    if member.top_role >= guild.me.top_role:
+        await interaction.response.send_message(
+            "❌ I can’t change that member’s nickname (my role is too low).",
+            ephemeral=True,
+        )
+        return
+
+    uses = await get_cringe_uses_today(guild_id, user_id)
+    if uses >= CRINGE_MAX_USES:
+        await interaction.response.send_message(
+            f"❌ You’ve already used **Cringe** {CRINGE_MAX_USES} times today."
+        )
+        return
+
+    settings = await get_guild_settings(guild_id)
+    tz = get_tz(settings)
+    now = datetime.now(tz)
+    reset_time = now.replace(
+        hour=settings["reset_hour"],
+        minute=settings["reset_minute"],
+        second=0,
+        microsecond=0,
+    )
+    if reset_time <= now:
+        reset_time += timedelta(days=1)
+
+    # Same window as jester — lifts 5 minutes before reset
+    end_local = reset_time - timedelta(minutes=5)
+    until_utc = end_local.astimezone(timezone.utc)
+
+    # Save current nick (None if they only use username)
+    original_nick = member.nick
+    cringe_nick = _clamp_nick(random.choice(CRINGE_NAMES))
+
+    try:
+        await member.edit(nick=cringe_nick)
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "❌ Missing permission to change that nickname.",
+            ephemeral=True,
+        )
+        return
+    except Exception as e:
+        log.warning("Cringe nick failed for %s: %s", member.id, e)
+        await interaction.response.send_message(
+            "❌ Couldn’t change their nickname.",
+            ephemeral=True,
+        )
+        return
+
+    await mark_cringe_used(guild_id, user_id)
+    await increment_crown_use(guild_id, user_id, "cringe")
+    await increment_victim_stat(guild_id, member.id, "cringe")
+    await set_cringe_effect(guild_id, member.id, original_nick, cringe_nick, until_utc)
+
+    uses_left = CRINGE_MAX_USES - (uses + 1)
+    embed = discord.Embed(color=discord.Color.orange())
+    embed.description = (
+        "# \u2728 Cringe Applied\n"
+        "-# Duration: Until 5 minutes before daily reset\n"
+        "-# Effect: Forced Halloween nickname (re-applies if they change it)\n\n"
+        f"**{member.mention}** is now **{cringe_nick}**\n"
+        f"-# Cringe uses left today: **{uses_left}**"
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+# -----------------------------------------
 # /reseteffects — ADMIN
 # -----------------------------------------
 
@@ -1149,6 +1427,20 @@ async def reseteffects(interaction: discord.Interaction, member: discord.Member 
 
         await reset_daily_power_usage(guild.id)
 
+        # Also clear every active cringe nick in this guild
+        async with pool.acquire() as conn:
+            cringe_rows = await conn.fetch("""
+                SELECT user_id, original_nick FROM cringe_effects
+                WHERE guild_id = $1
+            """, guild.id)
+            await conn.execute(
+                "DELETE FROM cringe_effects WHERE guild_id = $1", guild.id
+            )
+        for row in cringe_rows:
+            user = guild.get_member(row["user_id"])
+            if user:
+                await restore_cringe_nick(user, row["original_nick"])
+
         if settings["announce_channel_id"]:
             channel = guild.get_channel(settings["announce_channel_id"])
             if channel:
@@ -1162,40 +1454,49 @@ async def reseteffects(interaction: discord.Interaction, member: discord.Member 
 
     # RESET ONE USER'S EFFECTS
     target = member
-    if not effect or (
-        effect["cursed_user"] != target.id and
-        effect["mimed_user"] != target.id and
-        effect["jester_user"] != target.id
-    ):
+    cringe_row = await get_cringe_effect(guild.id, target.id)
+    if (
+        not effect
+        or (
+            effect["cursed_user"] != target.id
+            and effect["mimed_user"] != target.id
+            and effect["jester_user"] != target.id
+        )
+    ) and not cringe_row:
         await interaction.response.send_message("❌ That member has no active effects.")
         return
 
-    if effect["mimed_user"] == target.id:
-        try:
-            await target.send("🙊 You have done well mime. You may now speak!")
-        except Exception:
-            pass
+    if effect:
+        if effect["mimed_user"] == target.id:
+            try:
+                await target.send("🙊 You have done well mime. You may now speak!")
+            except Exception:
+                pass
 
-    if effect["jester_user"] == target.id:
-        try:
-            new_name = clean_display_name(target.display_name)
-            if new_name != target.display_name:
-                await target.edit(nick=new_name)
-        except Exception as e:
-            log.warning("Failed to clean jester nick for single reset: %s", e)
+        if effect["jester_user"] == target.id:
+            try:
+                new_name = clean_display_name(target.display_name)
+                if new_name != target.display_name:
+                    await target.edit(nick=new_name)
+            except Exception as e:
+                log.warning("Failed to clean jester nick for single reset: %s", e)
 
-    await ensure_db()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE active_effects
-            SET cursed_user = CASE WHEN cursed_user = $2 THEN NULL ELSE cursed_user END,
-                curse_until = CASE WHEN cursed_user = $2 THEN NULL ELSE curse_until END,
-                mimed_user = CASE WHEN mimed_user = $2 THEN NULL ELSE mimed_user END,
-                mime_until = CASE WHEN mimed_user = $2 THEN NULL ELSE mime_until END,
-                jester_user = CASE WHEN jester_user = $2 THEN NULL ELSE jester_user END,
-                jester_until = CASE WHEN jester_user = $2 THEN NULL ELSE jester_until END
-            WHERE guild_id = $1
-        """, guild.id, target.id)
+        await ensure_db()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE active_effects
+                SET cursed_user = CASE WHEN cursed_user = $2 THEN NULL ELSE cursed_user END,
+                    curse_until = CASE WHEN cursed_user = $2 THEN NULL ELSE curse_until END,
+                    mimed_user = CASE WHEN mimed_user = $2 THEN NULL ELSE mimed_user END,
+                    mime_until = CASE WHEN mimed_user = $2 THEN NULL ELSE mime_until END,
+                    jester_user = CASE WHEN jester_user = $2 THEN NULL ELSE jester_user END,
+                    jester_until = CASE WHEN jester_user = $2 THEN NULL ELSE jester_until END
+                WHERE guild_id = $1
+            """, guild.id, target.id)
+
+    if cringe_row:
+        await clear_cringe_effect(guild.id, target.id)
+        await restore_cringe_nick(target, cringe_row["original_nick"])
 
     if settings["announce_channel_id"]:
         channel = guild.get_channel(settings["announce_channel_id"])
@@ -1732,6 +2033,22 @@ async def on_message(message: discord.Message):
                     await message.author.edit(nick=f"{message.author.display_name} 🤡")
             except Exception as e:
                 log.warning("Failed to apply jester nick: %s", e)
+
+    # Cringe effect — expire or force the Halloween nick back
+    if isinstance(message.author, discord.Member):
+        cringe = await get_cringe_effect(guild.id, message.author.id)
+        if cringe:
+            until_ts = cringe["until_ts"]
+            if until_ts and until_ts < now_utc:
+                await clear_cringe_effect(guild.id, message.author.id)
+                await restore_cringe_nick(message.author, cringe["original_nick"])
+            else:
+                want = cringe["cringe_nick"]
+                if message.author.nick != want:
+                    try:
+                        await message.author.edit(nick=want)
+                    except Exception as e:
+                        log.warning("Failed to re-apply cringe nick: %s", e)
 
     await bot.process_commands(message)
 

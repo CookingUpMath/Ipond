@@ -1238,6 +1238,28 @@ async def jester(interaction: discord.Interaction, member: discord.Member):
 
     await set_active_effect(guild_id, "jester", member.id, until_utc)
 
+    # If they're already cringed, append 🤡 to the forced Halloween nick
+    # so both effects show without nick-flipping.
+    cringe_row = await get_cringe_effect(guild_id, member.id)
+    if cringe_row and cringe_row["until_ts"] and cringe_row["until_ts"] >= utcnow().replace(tzinfo=None):
+        base = clean_display_name(cringe_row["cringe_nick"])
+        with_jester = _clamp_nick(f"{base} 🤡")
+        if with_jester != cringe_row["cringe_nick"]:
+            until_aware = cringe_row["until_ts"]
+            if until_aware.tzinfo is None:
+                until_aware = until_aware.replace(tzinfo=timezone.utc)
+            await set_cringe_effect(
+                guild_id,
+                member.id,
+                cringe_row["original_nick"],
+                with_jester,
+                until_aware,
+            )
+            try:
+                await member.edit(nick=with_jester)
+            except Exception as e:
+                log.warning("Failed to apply jester onto cringe nick: %s", e)
+
     embed = discord.Embed(color=discord.Color.purple())
     embed.description = (
         "# 🤡 Jester Applied\n"
@@ -1307,6 +1329,20 @@ async def cringe(interaction: discord.Interaction, member: discord.Member):
     original_nick = member.nick
     old_display = member.display_name
     cringe_nick = _clamp_nick(random.choice(CRINGE_NAMES))
+
+    # If they're already jestered, fold 🤡 into the forced nick so the
+    # two powers don't fight over the name.
+    await ensure_db()
+    async with pool.acquire() as conn:
+        active = await conn.fetchrow(
+            "SELECT jester_user, jester_until FROM active_effects WHERE guild_id = $1",
+            guild_id,
+        )
+    if active and active["jester_user"] == member.id:
+        j_until = active["jester_until"]
+        if j_until and j_until >= utcnow().replace(tzinfo=None):
+            if "🤡" not in cringe_nick:
+                cringe_nick = _clamp_nick(f"{cringe_nick} 🤡")
 
     try:
         await member.edit(nick=cringe_nick)
@@ -1998,9 +2034,27 @@ async def on_message(message: discord.Message):
                 member = guild.get_member(jester_user)
                 if member:
                     try:
-                        new_name = clean_display_name(member.display_name)
-                        if new_name != member.display_name:
-                            await member.edit(nick=new_name)
+                        # If they're also cringed, strip 🤡 from the forced
+                        # Halloween nick instead of wiping the whole name.
+                        cringe_row = await get_cringe_effect(guild.id, member.id)
+                        if cringe_row and cringe_row["until_ts"] and cringe_row["until_ts"] >= now_utc:
+                            base = clean_display_name(cringe_row["cringe_nick"])
+                            base = _clamp_nick(base)
+                            await set_cringe_effect(
+                                guild.id,
+                                member.id,
+                                cringe_row["original_nick"],
+                                base,
+                                cringe_row["until_ts"].replace(tzinfo=timezone.utc)
+                                if cringe_row["until_ts"].tzinfo is None
+                                else cringe_row["until_ts"],
+                            )
+                            if member.nick != base:
+                                await member.edit(nick=base)
+                        else:
+                            new_name = clean_display_name(member.display_name)
+                            if new_name != member.display_name:
+                                await member.edit(nick=new_name)
                     except Exception as e:
                         log.warning("Failed to clean expired jester nick: %s", e)
             jester_user = None
@@ -2047,15 +2101,16 @@ async def on_message(message: discord.Message):
                     log.warning("Failed to delete mimed message: %s", e)
                 return  # do not process commands on deleted messages
 
-        # Jester effect
-        if jester_user == message.author.id and jester_until and jester_until >= now_utc:
-            try:
-                if "🤡" not in message.author.display_name:
-                    await message.author.edit(nick=f"{message.author.display_name} 🤡")
-            except Exception as e:
-                log.warning("Failed to apply jester nick: %s", e)
+        jester_active = (
+            jester_user == message.author.id
+            and jester_until
+            and jester_until >= now_utc
+        )
+    else:
+        jester_active = False
 
-    # Cringe effect — expire or force the Halloween nick back
+    # Nick powers: cringe owns the full nickname; jester only adds 🤡.
+    # Never let both fight each other (that caused an infinite nick loop).
     if isinstance(message.author, discord.Member):
         cringe = await get_cringe_effect(guild.id, message.author.id)
         if cringe:
@@ -2063,13 +2118,46 @@ async def on_message(message: discord.Message):
             if until_ts and until_ts < now_utc:
                 await clear_cringe_effect(guild.id, message.author.id)
                 await restore_cringe_nick(message.author, cringe["original_nick"])
+                # After cringe ends, jester can still apply if active
+                if jester_active:
+                    try:
+                        if "🤡" not in message.author.display_name:
+                            await message.author.edit(
+                                nick=_clamp_nick(f"{message.author.display_name} 🤡")
+                            )
+                    except Exception as e:
+                        log.warning("Failed to apply jester nick after cringe ended: %s", e)
             else:
                 want = cringe["cringe_nick"]
+                if jester_active and "🤡" not in want:
+                    want = _clamp_nick(f"{clean_display_name(want)} 🤡")
+                    # Persist so we don't re-edit every message
+                    try:
+                        until_aware = until_ts
+                        if until_aware.tzinfo is None:
+                            until_aware = until_aware.replace(tzinfo=timezone.utc)
+                        await set_cringe_effect(
+                            guild.id,
+                            message.author.id,
+                            cringe["original_nick"],
+                            want,
+                            until_aware,
+                        )
+                    except Exception as e:
+                        log.warning("Failed to sync cringe+jester nick: %s", e)
                 if message.author.nick != want:
                     try:
                         await message.author.edit(nick=want)
                     except Exception as e:
                         log.warning("Failed to re-apply cringe nick: %s", e)
+        elif jester_active:
+            try:
+                if "🤡" not in message.author.display_name:
+                    await message.author.edit(
+                        nick=_clamp_nick(f"{message.author.display_name} 🤡")
+                    )
+            except Exception as e:
+                log.warning("Failed to apply jester nick: %s", e)
 
     await bot.process_commands(message)
 

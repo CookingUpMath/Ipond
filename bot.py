@@ -553,6 +553,46 @@ async def apply_champion_role(guild: discord.Guild, new_champion: discord.Member
 # DAILY RESET LOGIC + LOOP
 # -----------------------------------------
 
+async def clear_nickname_effects_for_guild(guild: discord.Guild):
+    """
+    Lift jester / cringe nicks before crowning so role, VC, and presence
+    use real names — not temporary power nicknames.
+    """
+    await ensure_db()
+
+    # Clear jester effect rows
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE active_effects
+            SET jester_user = NULL,
+                jester_until = NULL
+            WHERE guild_id = $1
+        """, guild.id)
+
+    for member in guild.members:
+        if "🤡" in member.display_name:
+            try:
+                new_name = clean_display_name(member.display_name)
+                if new_name != member.display_name:
+                    await member.edit(nick=new_name)
+            except Exception as e:
+                log.warning("Failed to clean jester nick for %s: %s", member.id, e)
+
+    # Restore every cringe nickname to the saved original
+    async with pool.acquire() as conn:
+        cringe_rows = await conn.fetch("""
+            SELECT user_id, original_nick FROM cringe_effects
+            WHERE guild_id = $1
+        """, guild.id)
+        await conn.execute(
+            "DELETE FROM cringe_effects WHERE guild_id = $1", guild.id
+        )
+    for row in cringe_rows:
+        member = guild.get_member(row["user_id"])
+        if member:
+            await restore_cringe_nick(member, row["original_nick"])
+
+
 async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: datetime):
     await ensure_db()
 
@@ -566,6 +606,9 @@ async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: dat
             SET last_reset_date = $1
             WHERE guild_id = $2
         """, now.date(), guild.id)
+
+    # Strip jester/cringe nicks FIRST so the crown uses real display names
+    await clear_nickname_effects_for_guild(guild)
 
     top = await get_top_user(guild.id)
 
@@ -648,6 +691,7 @@ async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: dat
     await reset_daily_counts(guild.id)
     await reset_daily_power_usage(guild.id)
 
+    # Clear remaining non-nick effects (nicks already restored before crowning)
     await ensure_db()
     async with pool.acquire() as conn:
         await conn.execute("""
@@ -660,30 +704,6 @@ async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: dat
                 jester_until = NULL
             WHERE guild_id = $1
         """, guild.id)
-
-    for member in guild.members:
-        if "🤡" in member.display_name:
-            try:
-                new_name = clean_display_name(member.display_name)
-                if new_name != member.display_name:
-                    await member.edit(nick=new_name)
-            except Exception as e:
-                log.warning("Failed to clean jester nick for %s: %s", member.id, e)
-
-    # Clear all cringe effects and restore original nicks
-    await ensure_db()
-    async with pool.acquire() as conn:
-        cringe_rows = await conn.fetch("""
-            SELECT user_id, original_nick FROM cringe_effects
-            WHERE guild_id = $1
-        """, guild.id)
-        await conn.execute(
-            "DELETE FROM cringe_effects WHERE guild_id = $1", guild.id
-        )
-    for row in cringe_rows:
-        member = guild.get_member(row["user_id"])
-        if member:
-            await restore_cringe_nick(member, row["original_nick"])
 
 
 @tasks.loop(minutes=1)

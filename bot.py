@@ -225,6 +225,15 @@ async def init_db():
         );
         """)
 
+        # Who has already been cringed today (unique targets only)
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS cringe_targets_today (
+            guild_id BIGINT,
+            target_id BIGINT,
+            PRIMARY KEY (guild_id, target_id)
+        );
+        """)
+
         # Optional all-time cringe cast/victim counters
         await conn.execute("""
         ALTER TABLE crown_uses
@@ -690,6 +699,7 @@ async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: dat
 
     await reset_daily_counts(guild.id)
     await reset_daily_power_usage(guild.id)
+    await clear_cringe_targets_today(guild.id)
 
     # Clear remaining non-nick effects (nicks already restored before crowning)
     await ensure_db()
@@ -1008,9 +1018,9 @@ async def set_cringe_effect(
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (guild_id, user_id)
             DO UPDATE SET
-                original_nick = EXCLUDED.original_nick,
                 cringe_nick = EXCLUDED.cringe_nick,
                 until_ts = EXCLUDED.until_ts
+                -- original_nick is intentionally NOT overwritten
         """, guild_id, user_id, original_nick, cringe_nick, naive_until)
 
 
@@ -1039,6 +1049,61 @@ async def restore_cringe_nick(member: discord.Member, original_nick: str | None)
         await member.edit(nick=original_nick)
     except Exception as e:
         log.warning("Failed to restore nick for %s: %s", member.id, e)
+
+
+async def was_cringed_today(guild_id: int, target_id: int) -> bool:
+    await ensure_db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT 1 FROM cringe_targets_today
+            WHERE guild_id = $1 AND target_id = $2
+        """, guild_id, target_id)
+    return row is not None
+
+
+async def mark_cringe_target_today(guild_id: int, target_id: int):
+    await ensure_db()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO cringe_targets_today (guild_id, target_id)
+            VALUES ($1, $2)
+            ON CONFLICT (guild_id, target_id) DO NOTHING
+        """, guild_id, target_id)
+
+
+async def clear_cringe_targets_today(guild_id: int):
+    await ensure_db()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM cringe_targets_today WHERE guild_id = $1", guild_id
+        )
+
+
+async def member_has_active_crown_effect(guild_id: int, member_id: int) -> str | None:
+    """
+    Returns the name of an active crown effect on this member, or None.
+    Used so powers cannot stack on the same person.
+    """
+    await ensure_db()
+    now_naive = utcnow().replace(tzinfo=None)
+
+    cringe = await get_cringe_effect(guild_id, member_id)
+    if cringe and cringe["until_ts"] and cringe["until_ts"] >= now_naive:
+        return "cringe"
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM active_effects WHERE guild_id = $1", guild_id
+        )
+    if not row:
+        return None
+    if row["cursed_user"] == member_id and row["curse_until"] and row["curse_until"] >= now_naive:
+        return "curse"
+    if row["mimed_user"] == member_id and row["mime_until"] and row["mime_until"] >= now_naive:
+        return "mime"
+    if row["jester_user"] == member_id and row["jester_until"] and row["jester_until"] >= now_naive:
+        return "jester"
+    return None
 
 
 # -----------------------------------------
@@ -1135,6 +1200,14 @@ async def curse(interaction: discord.Interaction, member: discord.Member):
         await interaction.response.send_message("❌ You have already used **Curse** today.")
         return
 
+    active = await member_has_active_crown_effect(guild_id, member.id)
+    if active:
+        await interaction.response.send_message(
+            f"❌ **{member.display_name}** already has an active **{active}** effect.\n"
+            "-# Crown powers can’t stack on the same person."
+        )
+        return
+
     await mark_power_used(guild_id, user_id, "curse")
     await increment_crown_use(guild_id, user_id, "curse")
     await increment_victim_stat(guild_id, member.id, "curse")
@@ -1182,6 +1255,14 @@ async def mime(interaction: discord.Interaction, member: discord.Member):
         await interaction.response.send_message("❌ You have already used **Mime** today.")
         return
 
+    active = await member_has_active_crown_effect(guild_id, member.id)
+    if active:
+        await interaction.response.send_message(
+            f"❌ **{member.display_name}** already has an active **{active}** effect.\n"
+            "-# Crown powers can’t stack on the same person."
+        )
+        return
+
     await mark_power_used(guild_id, user_id, "mime")
     await increment_crown_use(guild_id, user_id, "mime")
     await increment_victim_stat(guild_id, member.id, "mime")
@@ -1215,6 +1296,14 @@ async def jester(interaction: discord.Interaction, member: discord.Member):
 
     if await check_power_used(guild_id, user_id, "jester"):
         await interaction.response.send_message("❌ You have already used **Jester** today.")
+        return
+
+    active = await member_has_active_crown_effect(guild_id, member.id)
+    if active:
+        await interaction.response.send_message(
+            f"❌ **{member.display_name}** already has an active **{active}** effect.\n"
+            "-# Crown powers can’t stack on the same person."
+        )
         return
 
     await mark_power_used(guild_id, user_id, "jester")
@@ -1295,6 +1384,10 @@ async def cringe(interaction: discord.Interaction, member: discord.Member):
         await interaction.response.send_message("❌ You can’t cringe the server owner.", ephemeral=True)
         return
 
+    if member.id == user_id:
+        await interaction.response.send_message("❌ You can’t cringe yourself.", ephemeral=True)
+        return
+
     if member.top_role >= guild.me.top_role:
         await interaction.response.send_message(
             "❌ I can’t change that member’s nickname (my role is too low).",
@@ -1305,7 +1398,23 @@ async def cringe(interaction: discord.Interaction, member: discord.Member):
     uses = await get_cringe_uses_today(guild_id, user_id)
     if uses >= CRINGE_MAX_USES:
         await interaction.response.send_message(
-            f"❌ You’ve already used **Cringe** {CRINGE_MAX_USES} times today."
+            f"❌ You’ve already used **Cringe** on **{CRINGE_MAX_USES} different people** today."
+        )
+        return
+
+    # Never the same person twice in one day (also blocks while still active)
+    if await was_cringed_today(guild_id, member.id):
+        await interaction.response.send_message(
+            f"❌ **{member.display_name}** was already cringed today — pick someone else.\n"
+            "-# Cringe is **3 different people** per day."
+        )
+        return
+
+    active = await member_has_active_crown_effect(guild_id, member.id)
+    if active:
+        await interaction.response.send_message(
+            f"❌ **{member.display_name}** already has an active **{active}** effect.\n"
+            "-# Crown powers can’t stack on the same person."
         )
         return
 
@@ -1361,6 +1470,7 @@ async def cringe(interaction: discord.Interaction, member: discord.Member):
         return
 
     await mark_cringe_used(guild_id, user_id)
+    await mark_cringe_target_today(guild_id, member.id)
     await increment_crown_use(guild_id, user_id, "cringe")
     await increment_victim_stat(guild_id, member.id, "cringe")
     await set_cringe_effect(guild_id, member.id, original_nick, cringe_nick, until_utc)
@@ -1483,6 +1593,7 @@ async def reseteffects(interaction: discord.Interaction, member: discord.Member 
             """, guild.id)
 
         await reset_daily_power_usage(guild.id)
+        await clear_cringe_targets_today(guild.id)
 
         # Also clear every active cringe nick in this guild
         async with pool.acquire() as conn:

@@ -913,62 +913,64 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
 
 
 # -----------------------------------------
-# /cringe — HALLOWEEN NICKNAMES (3 / day)
+# /cringe — RETRO / THROWBACK NICKNAMES (3 / day)
 # -----------------------------------------
 
 CRINGE_MAX_USES = 3
 
 CRINGE_NAMES = [
-    "XxSp00kyKingxX",
-    "~*DarkQuack*~",
-    "♕NightBaddie♕",
-    "✨B00tyWitch✨",
-    "XxNotAVampirexX",
-    "💀xXBoneDaddyXx💀",
-    "☆ShadowMuffin☆",
-    "✨HexBabe✨",
-    "XxBloodAngelxX",
-    "🌙~MoonGoblin~🌙",
-    "🔥LilHellfire🔥",
-    "♱SaintOfSin♱",
-    "✨GhostieBoo✨",
-    "XxCursedCutiexX",
-    "🕸WebQueen🕸",
-    "🦇BatBoyUwU🦇",
-    "💜DarkSoul69💜",
-    "~*PumpkinSpiceSatan*~",
-    "✨UwUReaper✨",
-    "XxD3m0nSl4y3rxX",
-    "🎃GourdGoddess🎃",
-    "☆BooThang☆",
-    "💀xSkullyBabeXx",
-    "✨CryptCutie✨",
-    "🔮WitchTok🔮",
-    "XxMainCharacterGhostxX",
-    "🌙SoftGoth🌙",
-    "🔥HellYeahBabe🔥",
-    "✨NotLikeOtherSpooks✨",
-    "♕QueenOfTheDamnedLite♕",
-    "🦇xxBatkissxx🦇",
-    "💀DaddyDeath💀",
-    "✨LilHexBug✨",
-    "~*EmoFog*~",
-    "🕸xSpiderBaeXx",
-    "👻BooBae👻",
-    "✨DarkAuraOnly✨",
-    "XxVoidPrincexX",
-    "🎃SpiceAndEvil🎃",
-    "💜SadBatEnergy💜",
-    "✨CertifiedFangs✨",
-    "☆CreepyCute☆",
-    "🧙WitchPleaseXx",
-    "💀xXDeadInsidexX💀",
-    "✨SoulSnatcherUwU✨",
-    "🦇NightTerrorJr🦇",
-    "🔥XxBurnNoticeXx🔥",
-    "🌙HexyBaby🌙",
-    "✨GhostWithTheMost✨",
-    "♕LilLich♕",
+    # Early internet / chat
+    "XxAIMAwayxX",
+    "~*brb toilet*~",
+    "A/S/L?",
+    "✨NewMessageSound✨",
+    "XxDialUpKingxX",
+    "💔BlockedByCrush💔",
+    "☆SignedOff☆",
+    "✨BuddyListBabe✨",
+    "XxScreenName69xX",
+    "💻Loading…💻",
+    "📱T9Only📱",
+    "XxNoCallerIDxX",
+    "✨ChainEmailSurvivor✨",
+    # Y2K / late 90s–00s vibe
+    "✨Y2KBaddie✨",
+    "XxButterflyClipsxX",
+    "🦋FrostedTips🦋",
+    "☆LowRiseQueen☆",
+    "✨BedazzledEverything✨",
+    "XxVelourTracksuitxX",
+    "💿BurnedCDMix💿",
+    "✨FlipPhonePrincess✨",
+    "♕SidekickOwner♕",
+    "XxRazorPhoneXx",
+    # VHS / arcade / 80s–90s
+    "📼BeKindRewind📼",
+    "XxVHSStaticxX",
+    "🕹️InsertCoin🕹️",
+    "✨HighScoreNobody✨",
+    "☆CassetteDeck☆",
+    "📺SnowOnChannel3📺",
+    "XxWalkmanWarriorxX",
+    "✨NeonWindbreaker✨",
+    "🛼RollerRinkReject🛼",
+    "XxBoomboxBroxX",
+    "💾SaveToFloppy💾",
+    "XxCtrlAltDeletexX",
+    "✨Error404Rizz✨",
+    "🕹️PressedStartTooEarly🕹️",
+    "XxGameOverKidxX",
+    "♕WindowsXPBabe♕",
+    # Scene / emo throwback (broad)
+    "~*Rawr XD*~",
+    "XxRawrMeansILoveYouxX",
+    "🖤HotTopicRegular🖤",
+    "✨MallGothIntern✨",
+    "☆EmoPhaseForever☆",
+    "✨SceneHairDontCare✨",
+    "XxSceneQueen06xX",
+    "💜SceneKidDropout💜",
+    "✨NotLikeOther2000sKids✨",
 ]
 
 
@@ -1366,7 +1368,7 @@ async def jester(interaction: discord.Interaction, member: discord.Member):
 
 @tree.command(
     name="cringe",
-    description="Force a painfully cringe Halloween nickname until near daily reset. (3 uses/day)",
+    description="Force a painfully cringe retro nickname until near daily reset. (3 different people/day)",
 )
 async def cringe(interaction: discord.Interaction, member: discord.Member):
     if not await ensure_champion_role_holder(interaction):
@@ -1480,7 +1482,7 @@ async def cringe(interaction: discord.Interaction, member: discord.Member):
     embed.description = (
         "# \u2728 Cringe Applied\n"
         "-# Duration: Until 5 minutes before daily reset\n"
-        "-# Effect: Forced Halloween nickname (re-applies if they change it)\n\n"
+        "-# Effect: Forced retro nickname (re-applies if they change it)\n\n"
         f"**{old_display}** is now {member.mention}\n"
         f"-# Cringe uses left today: **{uses_left}**"
     )

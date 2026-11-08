@@ -178,6 +178,26 @@ async def init_db():
         ALTER TABLE daily_power_usage
         ADD COLUMN IF NOT EXISTS cringe_uses_today INT DEFAULT 0;
         """)
+        await conn.execute("""
+        ALTER TABLE daily_power_usage
+        ADD COLUMN IF NOT EXISTS target_used_today BOOLEAN DEFAULT FALSE;
+        """)
+        await conn.execute("""
+        ALTER TABLE active_effects
+        ADD COLUMN IF NOT EXISTS targeted_user BIGINT;
+        """)
+        await conn.execute("""
+        ALTER TABLE active_effects
+        ADD COLUMN IF NOT EXISTS target_until TIMESTAMP;
+        """)
+        await conn.execute("""
+        ALTER TABLE crown_uses
+        ADD COLUMN IF NOT EXISTS target_used BIGINT DEFAULT 0;
+        """)
+        await conn.execute("""
+        ALTER TABLE victim_stats
+        ADD COLUMN IF NOT EXISTS targeted BIGINT DEFAULT 0;
+        """)
 
         # D_ZLove total tracker
         await conn.execute("""
@@ -443,6 +463,7 @@ async def increment_crown_use(guild_id: int, user_id: int, power: str):
         "mime": "mime_used",
         "jester": "jester_used",
         "cringe": "cringe_used",
+        "target": "target_used",
     }.get(power)
     if not col:
         return
@@ -463,6 +484,7 @@ async def increment_victim_stat(guild_id: int, user_id: int, power: str):
         "mime": "mimed",
         "jester": "jestered",
         "cringe": "cringed",
+        "target": "targeted",
     }.get(power)
     if not col:
         return
@@ -490,6 +512,8 @@ async def set_active_effect(guild_id: int, effect_type: str, user_id: int, until
         mime_until = row["mime_until"] if row else None
         jester_user = row["jester_user"] if row else None
         jester_until = row["jester_until"] if row else None
+        targeted_user = row["targeted_user"] if row and "targeted_user" in row.keys() else None
+        target_until = row["target_until"] if row and "target_until" in row.keys() else None
 
         naive_until = to_naive_utc(until_utc)
 
@@ -502,10 +526,16 @@ async def set_active_effect(guild_id: int, effect_type: str, user_id: int, until
         elif effect_type == "jester":
             jester_user = user_id
             jester_until = naive_until
+        elif effect_type == "target":
+            targeted_user = user_id
+            target_until = naive_until
 
         await conn.execute("""
-            INSERT INTO active_effects (guild_id, cursed_user, curse_until, mimed_user, mime_until, jester_user, jester_until)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO active_effects (
+                guild_id, cursed_user, curse_until, mimed_user, mime_until,
+                jester_user, jester_until, targeted_user, target_until
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (guild_id)
             DO UPDATE SET
                 cursed_user = EXCLUDED.cursed_user,
@@ -513,8 +543,11 @@ async def set_active_effect(guild_id: int, effect_type: str, user_id: int, until
                 mimed_user = EXCLUDED.mimed_user,
                 mime_until = EXCLUDED.mime_until,
                 jester_user = EXCLUDED.jester_user,
-                jester_until = EXCLUDED.jester_until
-        """, guild_id, cursed_user, curse_until, mimed_user, mime_until, jester_user, jester_until)
+                jester_until = EXCLUDED.jester_until,
+                targeted_user = EXCLUDED.targeted_user,
+                target_until = EXCLUDED.target_until
+        """, guild_id, cursed_user, curse_until, mimed_user, mime_until,
+           jester_user, jester_until, targeted_user, target_until)
 
 
 async def reset_daily_power_usage(guild_id: int):
@@ -711,7 +744,9 @@ async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: dat
                 mimed_user = NULL,
                 mime_until = NULL,
                 jester_user = NULL,
-                jester_until = NULL
+                jester_until = NULL,
+                targeted_user = NULL,
+                target_until = NULL
             WHERE guild_id = $1
         """, guild.id)
 
@@ -864,7 +899,7 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
     # Casted stats
     async with pool.acquire() as conn:
         uses = await conn.fetchrow("""
-            SELECT curse_used, mime_used, jester_used, cringe_used
+            SELECT curse_used, mime_used, jester_used, cringe_used, target_used
             FROM crown_uses
             WHERE guild_id = $1 AND user_id = $2
         """, guild_id, user_id)
@@ -873,11 +908,12 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
     mime_casted = uses["mime_used"] if uses else 0
     jester_casted = uses["jester_used"] if uses else 0
     cringe_casted = (uses["cringe_used"] if uses and uses["cringe_used"] is not None else 0)
+    target_casted = (uses["target_used"] if uses and uses["target_used"] is not None else 0)
 
     # Received stats
     async with pool.acquire() as conn:
         victim = await conn.fetchrow("""
-            SELECT cursed, mimed, jestered, cringed
+            SELECT cursed, mimed, jestered, cringed, targeted
             FROM victim_stats
             WHERE guild_id = $1 AND user_id = $2
         """, guild_id, user_id)
@@ -886,8 +922,9 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
     mimed_on = victim["mimed"] if victim else 0
     jestered_on = victim["jestered"] if victim else 0
     cringed_on = (victim["cringed"] if victim and victim["cringed"] is not None else 0)
+    targeted_on = (victim["targeted"] if victim and victim["targeted"] is not None else 0)
 
-    total_casted = curse_casted + mime_casted + jester_casted + cringe_casted
+    total_casted = curse_casted + mime_casted + jester_casted + cringe_casted + target_casted
 
     user_color = user.color if user.color.value != 0 else discord.Color.blurple()
 
@@ -904,7 +941,8 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
         f"-# 🙊 Mime: **{mime_casted} | {mimed_on}**\n"
         f"-# 🤡 Jester: **{jester_casted} | {jestered_on}**\n"
         f"-# 🔮 Curse: **{curse_casted} | {cursed_on}**\n"
-        f"-# ✨ Cringe: **{cringe_casted} | {cringed_on}**"
+        f"-# ✨ Cringe: **{cringe_casted} | {cringed_on}**\n"
+        f"-# 💩 Target: **{target_casted} | {targeted_on}**"
     )
 
     embed.set_footer(text="⚠️ Stats are Sent | Received")
@@ -1116,7 +1154,8 @@ async def check_power_used(guild_id: int, user_id: int, power: str) -> bool:
     column = {
         "curse": "curse_used_today",
         "mime": "mime_used_today",
-        "jester": "jester_used_today"
+        "jester": "jester_used_today",
+        "target": "target_used_today",
     }.get(power)
 
     await ensure_db()
@@ -1133,7 +1172,8 @@ async def mark_power_used(guild_id: int, user_id: int, power: str):
     column = {
         "curse": "curse_used_today",
         "mime": "mime_used_today",
-        "jester": "jester_used_today"
+        "jester": "jester_used_today",
+        "target": "target_used_today",
     }.get(power)
 
     await ensure_db()
@@ -1189,7 +1229,7 @@ async def ensure_champion_role_holder(interaction: discord.Interaction) -> bool:
 # /curse — ONCE PER RESET
 # -----------------------------------------
 
-@tree.command(name="curse", description="Curse a user until the daily reset.")
+@tree.command(name="curse", description="Curse a user until the daily reset (20% chance of quack replies).")
 async def curse(interaction: discord.Interaction, member: discord.Member):
 
     if not await ensure_champion_role_holder(interaction):
@@ -1202,13 +1242,6 @@ async def curse(interaction: discord.Interaction, member: discord.Member):
         await interaction.response.send_message("❌ You have already used **Curse** today.")
         return
 
-    active = await member_has_active_crown_effect(guild_id, member.id)
-    if active:
-        await interaction.response.send_message(
-            f"❌ **{member.display_name}** already has an active **{active}** effect.\n"
-            "-# Crown powers can’t stack on the same person."
-        )
-        return
 
     await mark_power_used(guild_id, user_id, "curse")
     await increment_crown_use(guild_id, user_id, "curse")
@@ -1233,10 +1266,59 @@ async def curse(interaction: discord.Interaction, member: discord.Member):
     embed.description = (
         "# 🦆 Curse Applied\n"
         "-# Duration: Until daily reset\n"
-        "-# Effect: 20% chance to annoy with quacks\n\n"
+        "-# Effect: 20% chance the bot **replies** with quack\n\n"
         f"**{member.mention}** has been **cursed**."
     )
 
+    await interaction.response.send_message(embed=embed)
+
+
+# -----------------------------------------
+# /target — ONCE PER RESET
+# -----------------------------------------
+
+@tree.command(
+    name="target",
+    description="Mark a user as the ducks' 💩 target until daily reset.",
+)
+async def target(interaction: discord.Interaction, member: discord.Member):
+    if not await ensure_champion_role_holder(interaction):
+        return
+
+    guild_id = interaction.guild_id
+    user_id = interaction.user.id
+
+    if await check_power_used(guild_id, user_id, "target"):
+        await interaction.response.send_message("❌ You have already used **Target** today.")
+        return
+
+    await mark_power_used(guild_id, user_id, "target")
+    await increment_crown_use(guild_id, user_id, "target")
+    await increment_victim_stat(guild_id, member.id, "target")
+
+    settings = await get_guild_settings(guild_id)
+    tz = get_tz(settings)
+    now = datetime.now(tz)
+    reset_time = now.replace(
+        hour=settings["reset_hour"],
+        minute=settings["reset_minute"],
+        second=0,
+        microsecond=0,
+    )
+    if reset_time <= now:
+        reset_time += timedelta(days=1)
+
+    until_utc = reset_time.astimezone(timezone.utc)
+    await set_active_effect(guild_id, "target", member.id, until_utc)
+
+    embed = discord.Embed(color=discord.Color.dark_gold())
+    embed.description = (
+        "# 💩 Target Acquired\n"
+        "-# Duration: Until daily reset\n"
+        "-# Effect: 20% chance their messages get 💩\n\n"
+        f"The ducks were given **laxatives**.\n"
+        f"They are now hunting {member.mention}."
+    )
     await interaction.response.send_message(embed=embed)
 
 
@@ -1257,13 +1339,6 @@ async def mime(interaction: discord.Interaction, member: discord.Member):
         await interaction.response.send_message("❌ You have already used **Mime** today.")
         return
 
-    active = await member_has_active_crown_effect(guild_id, member.id)
-    if active:
-        await interaction.response.send_message(
-            f"❌ **{member.display_name}** already has an active **{active}** effect.\n"
-            "-# Crown powers can’t stack on the same person."
-        )
-        return
 
     await mark_power_used(guild_id, user_id, "mime")
     await increment_crown_use(guild_id, user_id, "mime")
@@ -1276,7 +1351,8 @@ async def mime(interaction: discord.Interaction, member: discord.Member):
     embed.description = (
         "# 🤐 Mime Applied\n"
         "-# Duration: 30 minutes\n"
-        "-# Effect: Deletes any message containing text (emoji/stickers/images/GIFs allowed)\n\n"
+        "-# Effect: Text over 5 characters is deleted after ~1s "
+        "(emoji, stickers, images, and GIFs allowed)\n\n"
         f"**{member.mention}** has been **mimed**."
     )
 
@@ -1300,13 +1376,6 @@ async def jester(interaction: discord.Interaction, member: discord.Member):
         await interaction.response.send_message("❌ You have already used **Jester** today.")
         return
 
-    active = await member_has_active_crown_effect(guild_id, member.id)
-    if active:
-        await interaction.response.send_message(
-            f"❌ **{member.display_name}** already has an active **{active}** effect.\n"
-            "-# Crown powers can’t stack on the same person."
-        )
-        return
 
     await mark_power_used(guild_id, user_id, "jester")
     await increment_crown_use(guild_id, user_id, "jester")
@@ -1412,13 +1481,6 @@ async def cringe(interaction: discord.Interaction, member: discord.Member):
         )
         return
 
-    active = await member_has_active_crown_effect(guild_id, member.id)
-    if active:
-        await interaction.response.send_message(
-            f"❌ **{member.display_name}** already has an active **{active}** effect.\n"
-            "-# Crown powers can’t stack on the same person."
-        )
-        return
 
     settings = await get_guild_settings(guild_id)
     tz = get_tz(settings)
@@ -1590,7 +1652,9 @@ async def reseteffects(interaction: discord.Interaction, member: discord.Member 
                     mimed_user = NULL,
                     mime_until = NULL,
                     jester_user = NULL,
-                    jester_until = NULL
+                    jester_until = NULL,
+                    targeted_user = NULL,
+                    target_until = NULL
                 WHERE guild_id = $1
             """, guild.id)
 
@@ -1625,12 +1689,14 @@ async def reseteffects(interaction: discord.Interaction, member: discord.Member 
     # RESET ONE USER'S EFFECTS
     target = member
     cringe_row = await get_cringe_effect(guild.id, target.id)
+    targeted_id = effect["targeted_user"] if effect and "targeted_user" in effect.keys() else None
     if (
         not effect
         or (
             effect["cursed_user"] != target.id
             and effect["mimed_user"] != target.id
             and effect["jester_user"] != target.id
+            and targeted_id != target.id
         )
     ) and not cringe_row:
         await interaction.response.send_message("❌ That member has no active effects.")
@@ -1660,7 +1726,9 @@ async def reseteffects(interaction: discord.Interaction, member: discord.Member 
                     mimed_user = CASE WHEN mimed_user = $2 THEN NULL ELSE mimed_user END,
                     mime_until = CASE WHEN mimed_user = $2 THEN NULL ELSE mime_until END,
                     jester_user = CASE WHEN jester_user = $2 THEN NULL ELSE jester_user END,
-                    jester_until = CASE WHEN jester_user = $2 THEN NULL ELSE jester_until END
+                    jester_until = CASE WHEN jester_user = $2 THEN NULL ELSE jester_until END,
+                    targeted_user = CASE WHEN targeted_user = $2 THEN NULL ELSE targeted_user END,
+                    target_until = CASE WHEN targeted_user = $2 THEN NULL ELSE target_until END
                 WHERE guild_id = $1
             """, guild.id, target.id)
 
@@ -2093,6 +2161,45 @@ def is_emoji_only(text: str) -> bool:
     return True
 
 
+_GIF_LINK_RE = re.compile(
+    r"(tenor\.com|giphy\.com|media\.tenor\.com|c\.tenor\.com|"
+    r"media\.discordapp\.net|cdn\.discordapp\.com)",
+    re.IGNORECASE,
+)
+
+
+def _mime_should_delete(message: discord.Message) -> bool:
+    """
+    Soft mime rules:
+    - Always allow stickers, attachments, and GIF/Tenor/Giphy links
+    - Allow emoji-only messages
+    - Only delete when remaining text is longer than 5 characters
+    """
+    if message.stickers:
+        return False
+    if message.attachments:
+        return False
+
+    content = message.content or ""
+    if not content.strip():
+        return False
+
+    # GIF picker / Tenor / Giphy style messages
+    if _GIF_LINK_RE.search(content):
+        return False
+
+    if is_emoji_only(content):
+        return False
+
+    # Strip custom emoji markup so only real text counts toward the limit
+    text_only = CUSTOM_EMOJI_RE.sub("", content)
+    # Rough strip of URLs so a lone link doesn't count as a novel
+    text_only = re.sub(r"https?://\S+", "", text_only)
+    text_only = "".join(ch for ch in text_only if not ch.isspace())
+
+    return len(text_only) > 5
+
+
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -2122,6 +2229,8 @@ async def on_message(message: discord.Message):
         mime_until = effect["mime_until"]
         jester_user = effect["jester_user"]
         jester_until = effect["jester_until"]
+        targeted_user = effect["targeted_user"] if "targeted_user" in effect.keys() else None
+        target_until = effect["target_until"] if "target_until" in effect.keys() else None
 
         update_needed = False
 
@@ -2174,6 +2283,11 @@ async def on_message(message: discord.Message):
             jester_until = None
             update_needed = True
 
+        if target_until and target_until < now_utc:
+            targeted_user = None
+            target_until = None
+            update_needed = True
+
         if update_needed:
             await ensure_db()
             async with pool.acquire() as conn:
@@ -2184,35 +2298,47 @@ async def on_message(message: discord.Message):
                         mimed_user = $4,
                         mime_until = $5,
                         jester_user = $6,
-                        jester_until = $7
+                        jester_until = $7,
+                        targeted_user = $8,
+                        target_until = $9
                     WHERE guild_id = $1
                 """, guild.id,
                    cursed_user, curse_until,
                    mimed_user, mime_until,
-                   jester_user, jester_until)
+                   jester_user, jester_until,
+                   targeted_user, target_until)
 
-        # Curse effect
+        # Curse effect — reply with quack (no reaction)
         if cursed_user == message.author.id and curse_until and curse_until >= now_utc:
             if random.random() < 0.20:
                 try:
-                    await message.add_reaction("🦆")
+                    await message.reply("quack", mention_author=False)
                 except Exception:
-                    pass
+                    try:
+                        await message.channel.send("quack")
+                    except Exception:
+                        pass
+
+        # Target effect — 20% chance of 💩 reaction
+        if targeted_user == message.author.id and target_until and target_until >= now_utc:
+            if random.random() < 0.20:
                 try:
-                    await message.channel.send("quack")
+                    await message.add_reaction("💩")
                 except Exception:
                     pass
 
-        # Mime effect
+        # Mime effect (soft): delay ~1s, only long-ish text, allow GIFs/media
         if mimed_user == message.author.id and mime_until and mime_until >= now_utc:
-            content = message.content or ""
+            if _mime_should_delete(message):
+                async def _delayed_mime_delete(msg: discord.Message):
+                    await asyncio.sleep(1.0)
+                    try:
+                        await msg.delete()
+                    except Exception as e:
+                        log.warning("Failed to delete mimed message: %s", e)
 
-            if content.strip() and not is_emoji_only(content):
-                try:
-                    await message.delete()
-                except Exception as e:
-                    log.warning("Failed to delete mimed message: %s", e)
-                return  # do not process commands on deleted messages
+                asyncio.create_task(_delayed_mime_delete(message))
+                # Still count the message / process commands; delete is delayed
 
         jester_active = (
             jester_user == message.author.id

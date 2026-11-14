@@ -3248,8 +3248,6 @@ async def hangout(
             f"{text}"
         )
         for uid in attendee_ids:
-            if uid == interaction.user.id:
-                continue
             member = interaction.guild.get_member(uid)
             if member is None:
                 try:
@@ -3263,7 +3261,7 @@ async def hangout(
             except Exception:
                 failed += 1
         await interaction.followup.send(
-            f"📢 Announcement sent.\n-# Delivered: **{sent}** · Couldn’t DM: **{failed}**",
+            f"📢 Announcement sent to all attendees (including you).\n-# Delivered: **{sent}** · Couldn’t DM: **{failed}**",
             ephemeral=True,
         )
         return

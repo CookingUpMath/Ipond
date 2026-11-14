@@ -3277,10 +3277,405 @@ class HangoutCreateModal(discord.ui.Modal, title="Create a Hangout"):
         )
 
 
+
+def _parse_hangout_schedule(date_raw: str, time_raw: str, tz_raw: str):
+    """
+    Validate date/time/timezone. Returns (starts_utc_naive, tz_raw, error_message).
+    """
+    tz = _resolve_hangout_tz(tz_raw)
+    if tz is None:
+        return None, None, (
+            "❌ Timezone not recognized.\n"
+            "-# Try `EST`, `PST`, `UTC`, or `America/New_York`."
+        )
+    try:
+        date_part = datetime.strptime(date_raw.strip(), "%Y-%m-%d").date()
+    except ValueError:
+        return None, None, "❌ Invalid date. Use `YYYY-MM-DD` (e.g. `2026-11-20`)."
+    try:
+        time_part = datetime.strptime(time_raw.strip(), "%H:%M").time()
+    except ValueError:
+        return None, None, "❌ Invalid time. Use 24h `HH:MM` (e.g. `19:30`)."
+    local_dt = tz.localize(datetime.combine(date_part, time_part))
+    starts_utc = local_dt.astimezone(timezone.utc)
+    if starts_utc <= utcnow():
+        return None, None, "❌ That time is in the past. Pick a future date/time."
+    return starts_utc.replace(tzinfo=None), tz_raw.strip(), None
+
+
+def _hangout_local_parts(row) -> tuple[str, str, str]:
+    """Return (date_str, time_str, tz_str) for pre-filling the edit modal."""
+    tz_raw = row["timezone_str"] or "UTC"
+    tz = _resolve_hangout_tz(tz_raw) or pytz.UTC
+    starts = row["starts_at"]
+    if starts.tzinfo is None:
+        starts = starts.replace(tzinfo=timezone.utc)
+    else:
+        starts = starts.astimezone(timezone.utc)
+    local = starts.astimezone(tz)
+    return local.strftime("%Y-%m-%d"), local.strftime("%H:%M"), tz_raw
+
+
+async def _dm_hangout_attendees(
+    guild: discord.Guild,
+    hangout_id: str,
+    *,
+    exclude_user_id: int | None = None,
+    content: str | None = None,
+    embed: discord.Embed | None = None,
+) -> tuple[int, int]:
+    """DM current attendees. Returns (sent, failed)."""
+    ids = await get_hangout_attendee_ids(guild.id, hangout_id)
+    sent = failed = 0
+    for uid in ids:
+        if exclude_user_id is not None and uid == exclude_user_id:
+            continue
+        member = guild.get_member(uid)
+        if member is None:
+            try:
+                member = await guild.fetch_member(uid)
+            except Exception:
+                failed += 1
+                continue
+        try:
+            await member.send(content=content, embed=embed)
+            sent += 1
+        except Exception:
+            failed += 1
+    return sent, failed
+
+
+async def _try_update_public_hangout_message(guild: discord.Guild, row, embed: discord.Embed, view=None):
+    """Edit the original public post if we still can."""
+    channel_id = row["channel_id"]
+    message_id = row["message_id"]
+    if not channel_id or not message_id:
+        return
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        return
+    try:
+        msg = await channel.fetch_message(message_id)
+        kwargs = {"embed": embed}
+        if view is not None:
+            kwargs["view"] = view
+        await msg.edit(**kwargs)
+    except Exception as e:
+        log.warning("Could not edit public hangout message: %s", e)
+
+
+async def _try_delete_public_hangout_message(guild: discord.Guild, row):
+    channel_id = row["channel_id"]
+    message_id = row["message_id"]
+    if not channel_id or not message_id:
+        return
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        return
+    try:
+        msg = await channel.fetch_message(message_id)
+        await msg.delete()
+    except Exception as e:
+        log.warning("Could not delete public hangout message: %s", e)
+
+
+class HangoutEditConfirmView(discord.ui.View):
+    """
+    Save changes or delete. Timeout = nothing is applied.
+    """
+
+    def __init__(self, guild_id: int, hangout_id: str, creator_id: int, pending: dict, original: dict):
+        super().__init__(timeout=180)
+        self.guild_id = guild_id
+        self.hangout_id = hangout_id.upper()
+        self.creator_id = creator_id
+        self.pending = pending
+        self.original = original
+        self._done = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.creator_id:
+            await interaction.response.send_message(
+                "❌ Only the host can confirm these changes.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        self._done = True
+
+    def _changes_made(self) -> bool:
+        o, p = self.original, self.pending
+        if (o["title"] or "") != (p["title"] or ""):
+            return True
+        if (o["description"] or "") != (p["description"] or ""):
+            return True
+        if (o["timezone_str"] or "") != (p["timezone_str"] or ""):
+            return True
+        # Compare starts_at to the minute
+        os_ = o["starts_at"]
+        ps_ = p["starts_at"]
+        if hasattr(os_, "replace"):
+            os_ = os_.replace(tzinfo=None, second=0, microsecond=0) if os_.tzinfo is None else os_
+        if os_ != ps_:
+            # normalize
+            def _naive(dt):
+                if dt is None:
+                    return None
+                if getattr(dt, "tzinfo", None) is not None:
+                    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                return dt.replace(second=0, microsecond=0)
+            if _naive(o["starts_at"]) != _naive(p["starts_at"]):
+                return True
+        return False
+
+    @discord.ui.button(label="Save changes", style=discord.ButtonStyle.success, emoji="💾")
+    async def save_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self._done:
+            await interaction.response.send_message("❌ This menu expired.", ephemeral=True)
+            return
+        if not self._changes_made():
+            self._done = True
+            for c in self.children:
+                c.disabled = True
+            await interaction.response.edit_message(
+                content="No changes detected — nothing was updated.",
+                embed=None,
+                view=self,
+            )
+            return
+
+        self._done = True
+        for c in self.children:
+            c.disabled = True
+
+        guild = interaction.guild
+        p = self.pending
+        time_changed = False
+        def _naive(dt):
+            if dt is None:
+                return None
+            if getattr(dt, "tzinfo", None) is not None:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            return dt.replace(second=0, microsecond=0)
+        if _naive(self.original["starts_at"]) != _naive(p["starts_at"]):
+            time_changed = True
+
+        await ensure_db()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE hangouts
+                SET title = $3,
+                    description = $4,
+                    starts_at = $5,
+                    timezone_str = $6,
+                    reminded = CASE WHEN $7 THEN FALSE ELSE reminded END
+                WHERE guild_id = $1 AND hangout_id = $2
+                """,
+                self.guild_id,
+                self.hangout_id,
+                p["title"],
+                p["description"],
+                p["starts_at"],
+                p["timezone_str"],
+                time_changed,
+            )
+
+        row = await get_hangout(self.guild_id, self.hangout_id)
+        attendees = await get_hangout_attendee_ids(self.guild_id, self.hangout_id)
+        embed = build_hangout_embed(row, attendee_count=len(attendees))
+        view = HangoutAttendView(self.hangout_id)
+        bot.add_view(view)
+
+        if row and row["is_public"]:
+            await _try_update_public_hangout_message(guild, row, embed, view)
+
+        sent, failed = await _dm_hangout_attendees(
+            guild,
+            self.hangout_id,
+            content=f"**Hangout updated** — **{row['title']}** (`{self.hangout_id}`)",
+            embed=embed,
+        )
+
+        await interaction.response.edit_message(
+            content=(
+                f"✅ Hangout **{row['title']}** updated.\n"
+                f"-# Notified attendees: **{sent}** · Couldn’t DM: **{failed}**"
+            ),
+            embed=embed,
+            view=None,
+        )
+
+    @discord.ui.button(label="Delete hangout", style=discord.ButtonStyle.danger, emoji="🗑️")
+    async def delete_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self._done:
+            await interaction.response.send_message("❌ This menu expired.", ephemeral=True)
+            return
+        self._done = True
+        for c in self.children:
+            c.disabled = True
+
+        guild = interaction.guild
+        row = await get_hangout(self.guild_id, self.hangout_id)
+        title = row["title"] if row else self.original.get("title", "Hangout")
+
+        body = (
+            f"**Hangout cancelled**\n"
+            f"**{title}** (`{self.hangout_id}`) was deleted by the host.\n"
+            f"-# Check `/hangout` → **List** for other public hangouts."
+        )
+        sent, failed = await _dm_hangout_attendees(
+            guild,
+            self.hangout_id,
+            exclude_user_id=self.creator_id,
+            content=body,
+        )
+
+        if row:
+            await _try_delete_public_hangout_message(guild, row)
+
+        await ensure_db()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM hangout_attendees WHERE guild_id = $1 AND hangout_id = $2",
+                self.guild_id,
+                self.hangout_id,
+            )
+            await conn.execute(
+                "DELETE FROM hangouts WHERE guild_id = $1 AND hangout_id = $2",
+                self.guild_id,
+                self.hangout_id,
+            )
+
+        await interaction.response.edit_message(
+            content=(
+                f"🗑️ Hangout **{title}** (`{self.hangout_id}`) deleted.\n"
+                f"-# Attendees notified: **{sent}** · Couldn’t DM: **{failed}**"
+            ),
+            embed=None,
+            view=None,
+        )
+
+
+class HangoutEditModal(discord.ui.Modal, title="Edit Hangout"):
+    title_input = discord.ui.TextInput(
+        label="Title",
+        max_length=HANGOUT_TITLE_MAX,
+        required=True,
+    )
+    description_input = discord.ui.TextInput(
+        label="Description",
+        style=discord.TextStyle.paragraph,
+        max_length=HANGOUT_DESC_MAX,
+        required=True,
+    )
+    date_input = discord.ui.TextInput(
+        label="Date",
+        placeholder="2026-11-20",
+        max_length=10,
+        required=True,
+    )
+    time_input = discord.ui.TextInput(
+        label="Time (24h)",
+        placeholder="19:30",
+        max_length=5,
+        required=True,
+    )
+    timezone_input = discord.ui.TextInput(
+        label="Timezone",
+        placeholder="EST or America/New_York",
+        max_length=40,
+        required=True,
+    )
+
+    def __init__(self, guild_id: int, hangout_id: str, creator_id: int, row):
+        super().__init__()
+        self.guild_id = guild_id
+        self.hangout_id = hangout_id.upper()
+        self.creator_id = creator_id
+        self.original_row = dict(row)
+
+        date_s, time_s, tz_s = _hangout_local_parts(row)
+        self.title_input.default = (row["title"] or "")[:HANGOUT_TITLE_MAX]
+        self.description_input.default = (row["description"] or "")[:HANGOUT_DESC_MAX]
+        self.date_input.default = date_s
+        self.time_input.default = time_s
+        self.timezone_input.default = tz_s
+
+    async def on_submit(self, interaction: discord.Interaction):
+        title = str(self.title_input).strip()
+        description = str(self.description_input).strip()
+        if not title or not description:
+            await interaction.response.send_message(
+                "❌ Title and description are required.", ephemeral=True
+            )
+            return
+
+        starts_at, tz_raw, err = _parse_hangout_schedule(
+            str(self.date_input), str(self.time_input), str(self.timezone_input)
+        )
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+
+        # Re-check not started / not closed
+        live = await get_hangout(self.guild_id, self.hangout_id)
+        if not live or live["closed"]:
+            await interaction.response.send_message(
+                "❌ This hangout can’t be edited anymore.", ephemeral=True
+            )
+            return
+        starts = live["starts_at"]
+        if starts.tzinfo is None:
+            starts_cmp = starts.replace(tzinfo=timezone.utc)
+        else:
+            starts_cmp = starts.astimezone(timezone.utc)
+        if starts_cmp <= utcnow():
+            await interaction.response.send_message(
+                "❌ You can’t edit a hangout that has already started.",
+                ephemeral=True,
+            )
+            return
+
+        pending = {
+            "title": title[:HANGOUT_TITLE_MAX],
+            "description": description[:HANGOUT_DESC_MAX],
+            "starts_at": starts_at,
+            "timezone_str": tz_raw,
+        }
+        original = {
+            "title": live["title"],
+            "description": live["description"],
+            "starts_at": live["starts_at"],
+            "timezone_str": live["timezone_str"],
+        }
+
+        # Preview embed with pending values
+        preview = {
+            **dict(live),
+            **pending,
+            "hangout_id": self.hangout_id,
+        }
+        count = len(await get_hangout_attendee_ids(self.guild_id, self.hangout_id))
+        embed = build_hangout_embed(preview, attendee_count=count)
+        view = HangoutEditConfirmView(
+            self.guild_id, self.hangout_id, self.creator_id, pending, original
+        )
+        await interaction.response.send_message(
+            "Review your changes. **Save** to apply, or **Delete** to cancel the hangout.\n"
+            "-# If you do nothing, this expires and nothing changes.",
+            embed=embed,
+            view=view,
+            ephemeral=True,
+        )
+
+
+
 @tree.command(name="hangout", description="Create and join simple hangouts")
 @app_commands.describe(
     action="What do you want to do?",
-    id="Hangout ID (needed for view / announce)",
+    id="Hangout ID (needed for view / edit / announce)",
     message="Message to attendees (needed for announce)",
 )
 @app_commands.choices(
@@ -3288,6 +3683,7 @@ class HangoutCreateModal(discord.ui.Modal, title="Create a Hangout"):
         app_commands.Choice(name="Create", value="create"),
         app_commands.Choice(name="View", value="view"),
         app_commands.Choice(name="List", value="list"),
+        app_commands.Choice(name="Edit", value="edit"),
         app_commands.Choice(name="Announce", value="announce"),
     ]
 )
@@ -3394,8 +3790,10 @@ async def hangout(
         if attending_rows:
             for row in attending_rows:
                 unix = hangout_starts_unix(row)
+                now_u = int(utcnow().timestamp())
+                when_word = "Started" if unix <= now_u else "Starts"
                 parts.append(
-                    f"`{row['hangout_id']}` **{row['title']}** — Starts <t:{unix}:R>"
+                    f"`{row['hangout_id']}` **{row['title']}** — {when_word} <t:{unix}:R>"
                 )
         else:
             parts.append("-# You’re not attending any open hangouts.")
@@ -3417,6 +3815,53 @@ async def hangout(
             color=discord.Color.blurple(),
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    # ----- edit -----
+    if act == "edit":
+        if not id or not id.strip():
+            await interaction.response.send_message(
+                "❌ Provide the hangout **id** to edit.",
+                ephemeral=True,
+            )
+            return
+        code = id.strip().upper()
+        row = await get_hangout(interaction.guild.id, code)
+        if not row:
+            await interaction.response.send_message(
+                "❌ No hangout found with that ID.", ephemeral=True
+            )
+            return
+        if row["creator_id"] != interaction.user.id:
+            await interaction.response.send_message(
+                "❌ Only the host can edit this hangout.", ephemeral=True
+            )
+            return
+        if row["closed"]:
+            await interaction.response.send_message(
+                "❌ This hangout has ended and can’t be edited.", ephemeral=True
+            )
+            return
+        starts = row["starts_at"]
+        if starts.tzinfo is None:
+            starts_cmp = starts.replace(tzinfo=timezone.utc)
+        else:
+            starts_cmp = starts.astimezone(timezone.utc)
+        if starts_cmp <= utcnow():
+            await interaction.response.send_message(
+                "❌ You can’t edit a hangout that has already started.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_modal(
+            HangoutEditModal(
+                guild_id=interaction.guild.id,
+                hangout_id=code,
+                creator_id=interaction.user.id,
+                row=row,
+            )
+        )
         return
 
     # ----- announce -----

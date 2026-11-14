@@ -1003,6 +1003,7 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
     embed.description = (
         f"# {EMOJI_CROWN_TITLE}\n"
         f"-# {user.mention}'s Stats\n"
+        f"\n"
         f"`📝` Stickies:  **{sticky_display}**\n"
         f"`💬` Today’s Messages: **{daily_count}**\n"
         f"`👑` Crowned: **{win_count}**\n"

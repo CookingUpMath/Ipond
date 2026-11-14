@@ -264,6 +264,35 @@ async def init_db():
         ADD COLUMN IF NOT EXISTS cringed BIGINT DEFAULT 0;
         """)
 
+        # Hangouts
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS hangouts (
+            guild_id BIGINT NOT NULL,
+            hangout_id TEXT NOT NULL,
+            creator_id BIGINT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            starts_at TIMESTAMP NOT NULL,
+            timezone_str TEXT NOT NULL,
+            color INT,
+            is_public BOOLEAN NOT NULL DEFAULT TRUE,
+            channel_id BIGINT,
+            message_id BIGINT,
+            reminded BOOLEAN NOT NULL DEFAULT FALSE,
+            closed BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'UTC'),
+            PRIMARY KEY (guild_id, hangout_id)
+        );
+        """)
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS hangout_attendees (
+            guild_id BIGINT NOT NULL,
+            hangout_id TEXT NOT NULL,
+            user_id BIGINT NOT NULL,
+            PRIMARY KEY (guild_id, hangout_id, user_id)
+        );
+        """)
+
     log.info("Database initialized and tables ensured.")
 
 
@@ -599,28 +628,14 @@ async def clear_nickname_effects_for_guild(guild: discord.Guild):
     """
     Lift jester / cringe nicks before crowning so role, VC, and presence
     use real names — not temporary power nicknames.
+
+    Order matters: restore cringe originals FIRST, then strip leftover 🤡
+    from jester-only users. Doing jester cleanup first used to leave people
+    stuck on the mid-stack name (e.g. cringe name without the clown).
     """
     await ensure_db()
 
-    # Clear jester effect rows
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE active_effects
-            SET jester_user = NULL,
-                jester_until = NULL
-            WHERE guild_id = $1
-        """, guild.id)
-
-    for member in guild.members:
-        if "🤡" in member.display_name:
-            try:
-                new_name = clean_display_name(member.display_name)
-                if new_name != member.display_name:
-                    await member.edit(nick=new_name)
-            except Exception as e:
-                log.warning("Failed to clean jester nick for %s: %s", member.id, e)
-
-    # Restore every cringe nickname to the saved original
+    # Snapshot cringe rows, then delete them
     async with pool.acquire() as conn:
         cringe_rows = await conn.fetch("""
             SELECT user_id, original_nick FROM cringe_effects
@@ -629,10 +644,37 @@ async def clear_nickname_effects_for_guild(guild: discord.Guild):
         await conn.execute(
             "DELETE FROM cringe_effects WHERE guild_id = $1", guild.id
         )
+
+    # Clear jester flags in DB
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE active_effects
+            SET jester_user = NULL,
+                jester_until = NULL
+            WHERE guild_id = $1
+        """, guild.id)
+
+    cringed_ids = {row["user_id"] for row in cringe_rows}
+
+    # 1) Full restore for everyone who was cringed (ignores current 🤡 / forced name)
     for row in cringe_rows:
         member = guild.get_member(row["user_id"])
         if member:
             await restore_cringe_nick(member, row["original_nick"])
+
+    # 2) Jester-only: strip 🤡 from people who were NOT cringed
+    for member in guild.members:
+        if member.id in cringed_ids:
+            continue
+        if "🤡" in (member.display_name or ""):
+            try:
+                new_name = clean_display_name(member.display_name)
+                # If stripping leaves nothing useful, clear the nick
+                nick_to_set = new_name if new_name else None
+                if member.nick != nick_to_set:
+                    await member.edit(nick=nick_to_set)
+            except Exception as e:
+                log.warning("Failed to clean jester nick for %s: %s", member.id, e)
 
 
 async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: datetime):
@@ -1083,9 +1125,25 @@ async def clear_cringe_effect(guild_id: int, user_id: int):
         """, guild_id, user_id)
 
 
+def snapshot_original_nick(member: discord.Member) -> str | None:
+    """
+    Nickname to restore after crown powers end.
+    Strips jester 🤡 so we never save a mid-power name as the original.
+    None means the member had no server nickname (use username).
+    """
+    if member.nick is None:
+        return None
+    cleaned = clean_display_name(member.nick).strip()
+    return cleaned if cleaned else None
+
+
 async def restore_cringe_nick(member: discord.Member, original_nick: str | None):
-    """Restore pre-cringe nickname (None clears nick)."""
+    """Restore pre-cringe nickname (None clears nick → username shows)."""
     try:
+        if original_nick is not None:
+            original_nick = clean_display_name(original_nick).strip() or None
+        if member.nick == original_nick:
+            return
         await member.edit(nick=original_nick)
     except Exception as e:
         log.warning("Failed to restore nick for %s: %s", member.id, e)
@@ -1498,9 +1556,9 @@ async def cringe(interaction: discord.Interaction, member: discord.Member):
     end_local = reset_time - timedelta(minutes=5)
     until_utc = end_local.astimezone(timezone.utc)
 
-    # Save identity before the nick swap
-    original_nick = member.nick
-    old_display = member.display_name
+    # Save true pre-power identity (never store a jester/cringe mid-name)
+    original_nick = snapshot_original_nick(member)
+    old_display = clean_display_name(member.display_name)
     cringe_nick = _clamp_nick(random.choice(CRINGE_NAMES))
 
     # If they're already jestered, fold 🤡 into the forced nick so the
@@ -1633,15 +1691,8 @@ async def reseteffects(interaction: discord.Interaction, member: discord.Member 
                 except Exception:
                     pass
 
-        for uid in jester_users:
-            user = guild.get_member(uid)
-            if user:
-                try:
-                    new_name = clean_display_name(user.display_name)
-                    if new_name != user.display_name:
-                        await user.edit(nick=new_name)
-                except Exception as e:
-                    log.warning("Failed to clean jester nick on reset: %s", e)
+        # Restore nicks in the correct order (cringe originals first, then jester-only)
+        await clear_nickname_effects_for_guild(guild)
 
         await ensure_db()
         async with pool.acquire() as conn:
@@ -1660,20 +1711,6 @@ async def reseteffects(interaction: discord.Interaction, member: discord.Member 
 
         await reset_daily_power_usage(guild.id)
         await clear_cringe_targets_today(guild.id)
-
-        # Also clear every active cringe nick in this guild
-        async with pool.acquire() as conn:
-            cringe_rows = await conn.fetch("""
-                SELECT user_id, original_nick FROM cringe_effects
-                WHERE guild_id = $1
-            """, guild.id)
-            await conn.execute(
-                "DELETE FROM cringe_effects WHERE guild_id = $1", guild.id
-            )
-        for row in cringe_rows:
-            user = guild.get_member(row["user_id"])
-            if user:
-                await restore_cringe_nick(user, row["original_nick"])
 
         if settings["announce_channel_id"]:
             channel = guild.get_channel(settings["announce_channel_id"])
@@ -1709,14 +1746,6 @@ async def reseteffects(interaction: discord.Interaction, member: discord.Member 
             except Exception:
                 pass
 
-        if effect["jester_user"] == target.id:
-            try:
-                new_name = clean_display_name(target.display_name)
-                if new_name != target.display_name:
-                    await target.edit(nick=new_name)
-            except Exception as e:
-                log.warning("Failed to clean jester nick for single reset: %s", e)
-
         await ensure_db()
         async with pool.acquire() as conn:
             await conn.execute("""
@@ -1732,9 +1761,18 @@ async def reseteffects(interaction: discord.Interaction, member: discord.Member 
                 WHERE guild_id = $1
             """, guild.id, target.id)
 
+    # Cringe restore first (true original), then strip jester if still present
     if cringe_row:
         await clear_cringe_effect(guild.id, target.id)
         await restore_cringe_nick(target, cringe_row["original_nick"])
+    elif effect and effect["jester_user"] == target.id:
+        try:
+            new_name = clean_display_name(target.display_name)
+            nick_to_set = new_name if new_name else None
+            if target.nick != nick_to_set:
+                await target.edit(nick=nick_to_set)
+        except Exception as e:
+            log.warning("Failed to clean jester nick for single reset: %s", e)
 
     if settings["announce_channel_id"]:
         channel = guild.get_channel(settings["announce_channel_id"])
@@ -2361,9 +2399,10 @@ async def on_message(message: discord.Message):
                 if jester_active:
                     try:
                         if "🤡" not in message.author.display_name:
-                            await message.author.edit(
-                                nick=_clamp_nick(f"{message.author.display_name} 🤡")
+                            base = snapshot_original_nick(message.author) or clean_display_name(
+                                message.author.display_name
                             )
+                            await message.author.edit(nick=_clamp_nick(f"{base} 🤡"))
                     except Exception as e:
                         log.warning("Failed to apply jester nick after cringe ended: %s", e)
             else:
@@ -2392,9 +2431,10 @@ async def on_message(message: discord.Message):
         elif jester_active:
             try:
                 if "🤡" not in message.author.display_name:
-                    await message.author.edit(
-                        nick=_clamp_nick(f"{message.author.display_name} 🤡")
+                    base = snapshot_original_nick(message.author) or clean_display_name(
+                        message.author.display_name
                     )
+                    await message.author.edit(nick=_clamp_nick(f"{base} 🤡"))
             except Exception as e:
                 log.warning("Failed to apply jester nick: %s", e)
 
@@ -2527,10 +2567,799 @@ async def on_ready():
     if not daily_reset_loop.is_running():
         daily_reset_loop.start()
 
+    if not hangout_loop.is_running():
+        hangout_loop.start()
+
+    await register_open_hangout_views()
+
     asyncio.create_task(update_love_channel())
     await restore_champion_presence()
 
     log.info("Bot is online as %s", bot.user)
+
+
+# -----------------------------------------
+# HANGOUTS
+# -----------------------------------------
+
+HANGOUT_ID_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I
+HANGOUT_TITLE_MAX = 80
+HANGOUT_DESC_MAX = 400
+HANGOUT_REMIND_MINUTES = 5
+HANGOUT_CLOSE_MINUTES = 30
+
+# Common timezone aliases → pytz names
+HANGOUT_TZ_ALIASES = {
+    "EST": "US/Eastern",
+    "EDT": "US/Eastern",
+    "ET": "US/Eastern",
+    "CST": "US/Central",
+    "CDT": "US/Central",
+    "CT": "US/Central",
+    "MST": "US/Mountain",
+    "MDT": "US/Mountain",
+    "MT": "US/Mountain",
+    "PST": "US/Pacific",
+    "PDT": "US/Pacific",
+    "PT": "US/Pacific",
+    "UTC": "UTC",
+    "GMT": "UTC",
+    "BST": "Europe/London",
+    "CET": "Europe/Paris",
+    "CEST": "Europe/Paris",
+}
+
+
+def _resolve_hangout_tz(raw: str):
+    """Return a pytz timezone or None if unrecognized."""
+    key = (raw or "").strip()
+    if not key:
+        return None
+    mapped = HANGOUT_TZ_ALIASES.get(key.upper())
+    name = mapped or key
+    try:
+        return pytz.timezone(name)
+    except Exception:
+        return None
+
+
+async def _generate_hangout_id(guild_id: int) -> str:
+    await ensure_db()
+    for _ in range(40):
+        code = "".join(random.choice(HANGOUT_ID_CHARS) for _ in range(4))
+        async with pool.acquire() as conn:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM hangouts WHERE guild_id = $1 AND hangout_id = $2",
+                guild_id,
+                code,
+            )
+        if not exists:
+            return code
+    raise RuntimeError("Could not allocate hangout ID")
+
+
+async def get_hangout(guild_id: int, hangout_id: str):
+    await ensure_db()
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            """
+            SELECT * FROM hangouts
+            WHERE guild_id = $1 AND hangout_id = $2
+            """,
+            guild_id,
+            hangout_id.upper(),
+        )
+
+
+async def get_hangout_attendee_ids(guild_id: int, hangout_id: str) -> list[int]:
+    await ensure_db()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT user_id FROM hangout_attendees
+            WHERE guild_id = $1 AND hangout_id = $2
+            """,
+            guild_id,
+            hangout_id.upper(),
+        )
+    return [int(r["user_id"]) for r in rows]
+
+
+async def is_hangout_attending(guild_id: int, hangout_id: str, user_id: int) -> bool:
+    await ensure_db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT 1 FROM hangout_attendees
+            WHERE guild_id = $1 AND hangout_id = $2 AND user_id = $3
+            """,
+            guild_id,
+            hangout_id.upper(),
+            user_id,
+        )
+    return row is not None
+
+
+async def add_hangout_attendee(guild_id: int, hangout_id: str, user_id: int):
+    await ensure_db()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO hangout_attendees (guild_id, hangout_id, user_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT DO NOTHING
+            """,
+            guild_id,
+            hangout_id.upper(),
+            user_id,
+        )
+
+
+async def remove_hangout_attendee(guild_id: int, hangout_id: str, user_id: int):
+    await ensure_db()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            DELETE FROM hangout_attendees
+            WHERE guild_id = $1 AND hangout_id = $2 AND user_id = $3
+            """,
+            guild_id,
+            hangout_id.upper(),
+            user_id,
+        )
+
+
+def hangout_starts_unix(row) -> int:
+    starts = row["starts_at"]
+    if starts.tzinfo is None:
+        starts = starts.replace(tzinfo=timezone.utc)
+    else:
+        starts = starts.astimezone(timezone.utc)
+    return int(starts.timestamp())
+
+
+def build_hangout_embed(row, attendee_count: int | None = None) -> discord.Embed:
+    unix = hangout_starts_unix(row)
+    color_val = row["color"]
+    if color_val is not None and int(color_val) != 0:
+        color = discord.Color(int(color_val))
+    else:
+        color = discord.Color.blurple()
+
+    status = "Closed" if row["closed"] else "Open"
+    visibility = "Public" if row["is_public"] else "Private"
+
+    desc = (row["description"] or "").strip()
+    if len(desc) > 400:
+        desc = desc[:397] + "…"
+
+    lines = [
+        desc,
+        "",
+        f"**When:** <t:{unix}:F>",
+        f"**Starts:** <t:{unix}:R>",
+        f"**Visibility:** {visibility}",
+        f"**Status:** {status}",
+    ]
+    if attendee_count is not None:
+        lines.append(f"**Attending:** {attendee_count}")
+
+    embed = discord.Embed(
+        title=row["title"],
+        description="\n".join(lines),
+        color=color,
+    )
+    embed.set_footer(text=row["hangout_id"])
+    return embed
+
+
+class HangoutAttendView(discord.ui.View):
+    """Persistent attend/leave controls for a hangout."""
+
+    def __init__(self, hangout_id: str):
+        super().__init__(timeout=None)
+        self.hangout_id = hangout_id.upper()
+        attend_btn = discord.ui.Button(
+            label="Attend",
+            style=discord.ButtonStyle.success,
+            emoji="✅",
+            custom_id=f"hangout:{self.hangout_id}:attend",
+        )
+        leave_btn = discord.ui.Button(
+            label="Leave",
+            style=discord.ButtonStyle.secondary,
+            emoji="🚪",
+            custom_id=f"hangout:{self.hangout_id}:leave",
+        )
+        attend_btn.callback = self._attend
+        leave_btn.callback = self._leave
+        self.add_item(attend_btn)
+        self.add_item(leave_btn)
+
+    async def _attend(self, interaction: discord.Interaction):
+        await self._handle(interaction, joining=True)
+
+    async def _leave(self, interaction: discord.Interaction):
+        await self._handle(interaction, joining=False)
+
+    async def _handle(self, interaction: discord.Interaction, joining: bool):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "❌ Hangouts only work in a server.", ephemeral=True
+            )
+            return
+
+        guild_id = interaction.guild.id
+        user_id = interaction.user.id
+        row = await get_hangout(guild_id, self.hangout_id)
+        if not row:
+            await interaction.response.send_message(
+                "❌ That hangout doesn’t exist.", ephemeral=True
+            )
+            return
+        if row["closed"]:
+            await interaction.response.send_message(
+                "❌ This hangout has ended.", ephemeral=True
+            )
+            return
+
+        already = await is_hangout_attending(guild_id, self.hangout_id, user_id)
+        if joining:
+            if already:
+                await interaction.response.send_message(
+                    "You’re already attending this hangout.", ephemeral=True
+                )
+                return
+            await add_hangout_attendee(guild_id, self.hangout_id, user_id)
+            await interaction.response.send_message(
+                f"✅ You’re attending **{row['title']}** (`{self.hangout_id}`).",
+                ephemeral=True,
+            )
+        else:
+            if not already:
+                await interaction.response.send_message(
+                    "You’re not attending this hangout.", ephemeral=True
+                )
+                return
+            if user_id == row["creator_id"]:
+                await interaction.response.send_message(
+                    "❌ The creator can’t leave their own hangout.", ephemeral=True
+                )
+                return
+            await remove_hangout_attendee(guild_id, self.hangout_id, user_id)
+            await interaction.response.send_message(
+                f"🚪 You left **{row['title']}**.",
+                ephemeral=True,
+            )
+
+
+async def register_open_hangout_views():
+    """Re-bind Attend/Leave buttons after bot restart."""
+    await ensure_db()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT hangout_id FROM hangouts WHERE closed = FALSE"
+        )
+    for row in rows:
+        bot.add_view(HangoutAttendView(row["hangout_id"]))
+    if rows:
+        log.info("Registered %d open hangout view(s)", len(rows))
+
+
+class HangoutVisibilityView(discord.ui.View):
+    """After the create modal: choose Public or Private."""
+
+    def __init__(self, payload: dict):
+        super().__init__(timeout=180)
+        self.payload = payload
+        self._used = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.payload["creator_id"]:
+            await interaction.response.send_message(
+                "❌ Only the creator can choose visibility.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Public", style=discord.ButtonStyle.primary, emoji="📢")
+    async def public_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._finish(interaction, is_public=True)
+
+    @discord.ui.button(label="Private", style=discord.ButtonStyle.secondary, emoji="🔒")
+    async def private_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._finish(interaction, is_public=False)
+
+    async def _finish(self, interaction: discord.Interaction, is_public: bool):
+        if self._used:
+            await interaction.response.send_message("❌ Already created.", ephemeral=True)
+            return
+        self._used = True
+        for child in self.children:
+            child.disabled = True
+
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.edit_message(
+                content="❌ Hangouts only work in a server.", view=self
+            )
+            return
+
+        guild_id = guild.id
+        creator_id = self.payload["creator_id"]
+        try:
+            hangout_id = await _generate_hangout_id(guild_id)
+        except Exception as e:
+            log.error("Hangout ID alloc failed: %s", e)
+            await interaction.response.edit_message(
+                content="❌ Couldn’t create a hangout ID. Try again.", view=self
+            )
+            return
+
+        color = self.payload.get("color")
+        starts_at = self.payload["starts_at"]  # naive UTC
+
+        await ensure_db()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO hangouts (
+                    guild_id, hangout_id, creator_id, title, description,
+                    starts_at, timezone_str, color, is_public, closed, reminded
+                )
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, FALSE, FALSE)
+                """,
+                guild_id,
+                hangout_id,
+                creator_id,
+                self.payload["title"],
+                self.payload["description"],
+                starts_at,
+                self.payload["timezone_str"],
+                color,
+                is_public,
+            )
+        await add_hangout_attendee(guild_id, hangout_id, creator_id)
+
+        row = await get_hangout(guild_id, hangout_id)
+        embed = build_hangout_embed(row, attendee_count=1)
+        view = HangoutAttendView(hangout_id)
+        bot.add_view(view)
+
+        # DM creator
+        dm_ok = False
+        try:
+            user = interaction.user
+            await user.send(
+                content=(
+                    f"Your hangout **{row['title']}** is ready.\n"
+                    f"Share this ID: `{hangout_id}`\n"
+                    f"Others can run `/hangout view {hangout_id}`"
+                ),
+                embed=embed,
+            )
+            dm_ok = True
+        except Exception:
+            dm_ok = False
+
+        channel_id = None
+        message_id = None
+        if is_public and interaction.channel is not None:
+            try:
+                posted = await interaction.channel.send(embed=embed, view=view)
+                channel_id = posted.channel.id
+                message_id = posted.id
+            except Exception as e:
+                log.warning("Failed to post public hangout: %s", e)
+
+        if channel_id and message_id:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE hangouts
+                    SET channel_id = $3, message_id = $4
+                    WHERE guild_id = $1 AND hangout_id = $2
+                    """,
+                    guild_id,
+                    hangout_id,
+                    channel_id,
+                    message_id,
+                )
+
+        note = ""
+        if not dm_ok:
+            note = (
+                "\n-# Couldn’t DM you — enable **Server Members DMs** "
+                "if you want the 5-minute reminder."
+            )
+
+        await interaction.response.edit_message(
+            content=(
+                f"✅ Hangout **{row['title']}** created (`{hangout_id}`).\n"
+                f"-# {'Public post sent in channel.' if is_public else 'Private — share the ID with friends.'}"
+                f"{note}"
+            ),
+            embed=embed,
+            view=view if not is_public else None,
+        )
+
+
+class HangoutCreateModal(discord.ui.Modal, title="Create a Hangout"):
+    title_input = discord.ui.TextInput(
+        label="Title",
+        placeholder="Friday game night",
+        max_length=HANGOUT_TITLE_MAX,
+        required=True,
+    )
+    description_input = discord.ui.TextInput(
+        label="Description",
+        placeholder="What are we doing? (max 400 characters)",
+        style=discord.TextStyle.paragraph,
+        max_length=HANGOUT_DESC_MAX,
+        required=True,
+    )
+    date_input = discord.ui.TextInput(
+        label="Date",
+        placeholder="2026-11-20",
+        max_length=10,
+        required=True,
+    )
+    time_input = discord.ui.TextInput(
+        label="Time (24h)",
+        placeholder="19:30",
+        max_length=5,
+        required=True,
+    )
+    timezone_input = discord.ui.TextInput(
+        label="Timezone",
+        placeholder="EST or America/New_York",
+        max_length=40,
+        required=True,
+    )
+
+    def __init__(self, creator_id: int, color: int | None):
+        super().__init__()
+        self.creator_id = creator_id
+        self.color = color
+
+    async def on_submit(self, interaction: discord.Interaction):
+        title = str(self.title_input).strip()
+        description = str(self.description_input).strip()
+        date_raw = str(self.date_input).strip()
+        time_raw = str(self.time_input).strip()
+        tz_raw = str(self.timezone_input).strip()
+
+        if not title:
+            await interaction.response.send_message("❌ Title is required.", ephemeral=True)
+            return
+        if not description:
+            await interaction.response.send_message("❌ Description is required.", ephemeral=True)
+            return
+
+        tz = _resolve_hangout_tz(tz_raw)
+        if tz is None:
+            await interaction.response.send_message(
+                "❌ Timezone not recognized.\n"
+                "-# Try `EST`, `PST`, `UTC`, or `America/New_York`.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            date_part = datetime.strptime(date_raw, "%Y-%m-%d").date()
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ Invalid date. Use `YYYY-MM-DD` (e.g. `2026-11-20`).",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            time_part = datetime.strptime(time_raw, "%H:%M").time()
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ Invalid time. Use 24h `HH:MM` (e.g. `19:30`).",
+                ephemeral=True,
+            )
+            return
+
+        local_dt = tz.localize(datetime.combine(date_part, time_part))
+        starts_utc = local_dt.astimezone(timezone.utc)
+        if starts_utc <= utcnow():
+            await interaction.response.send_message(
+                "❌ That time is in the past. Pick a future date/time.",
+                ephemeral=True,
+            )
+            return
+
+        payload = {
+            "creator_id": self.creator_id,
+            "title": title[:HANGOUT_TITLE_MAX],
+            "description": description[:HANGOUT_DESC_MAX],
+            "starts_at": starts_utc.replace(tzinfo=None),
+            "timezone_str": tz_raw,
+            "color": self.color,
+        }
+        view = HangoutVisibilityView(payload)
+        await interaction.response.send_message(
+            "Almost done — is this hangout **public** or **private**?\n"
+            "-# Public: posted in this channel\n"
+            "-# Private: only people with the ID can view it",
+            view=view,
+            ephemeral=True,
+        )
+
+
+hangout_group = app_commands.Group(
+    name="hangout",
+    description="Create and join simple hangouts",
+)
+
+
+@hangout_group.command(name="create", description="Create a hangout")
+async def hangout_create(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "❌ Hangouts only work in a server.", ephemeral=True
+        )
+        return
+
+    color = None
+    if isinstance(interaction.user, discord.Member):
+        c = interaction.user.color
+        if c and c.value != 0:
+            color = c.value
+
+    await interaction.response.send_modal(
+        HangoutCreateModal(creator_id=interaction.user.id, color=color)
+    )
+
+
+@hangout_group.command(name="view", description="View a hangout by ID")
+@app_commands.describe(id="4-character hangout ID")
+async def hangout_view(interaction: discord.Interaction, id: str):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "❌ Hangouts only work in a server.", ephemeral=True
+        )
+        return
+
+    code = id.strip().upper()
+    row = await get_hangout(interaction.guild.id, code)
+    if not row:
+        await interaction.response.send_message(
+            "❌ No hangout found with that ID.", ephemeral=True
+        )
+        return
+
+    attendees = await get_hangout_attendee_ids(interaction.guild.id, code)
+    embed = build_hangout_embed(row, attendee_count=len(attendees))
+    view = HangoutAttendView(code) if not row["closed"] else None
+    if view:
+        bot.add_view(view)
+
+    # Private hangouts → ephemeral view only
+    ephemeral = not row["is_public"]
+    await interaction.response.send_message(
+        embed=embed, view=view, ephemeral=ephemeral
+    )
+
+
+@hangout_group.command(name="list", description="Hangouts you’re attending")
+async def hangout_list(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "❌ Hangouts only work in a server.", ephemeral=True
+        )
+        return
+
+    await ensure_db()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT h.*
+            FROM hangouts h
+            JOIN hangout_attendees a
+              ON a.guild_id = h.guild_id AND a.hangout_id = h.hangout_id
+            WHERE h.guild_id = $1
+              AND a.user_id = $2
+              AND h.closed = FALSE
+            ORDER BY h.starts_at ASC
+            LIMIT 25
+            """,
+            interaction.guild.id,
+            interaction.user.id,
+        )
+
+    if not rows:
+        await interaction.response.send_message(
+            "You’re not attending any open hangouts.\n"
+            "-# Create one with `/hangout create` or join with `/hangout view <id>`.",
+            ephemeral=True,
+        )
+        return
+
+    lines = []
+    for row in rows:
+        unix = hangout_starts_unix(row)
+        lines.append(
+            f"`{row['hangout_id']}` **{row['title']}** — <t:{unix}:f> (<t:{unix}:R>)"
+        )
+    embed = discord.Embed(
+        title="Your hangouts",
+        description="\n".join(lines),
+        color=discord.Color.blurple(),
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@hangout_group.command(
+    name="announce",
+    description="DM a message to everyone attending your hangout",
+)
+@app_commands.describe(
+    id="4-character hangout ID",
+    message="Message to send to attendees",
+)
+async def hangout_announce(
+    interaction: discord.Interaction, id: str, message: str
+):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "❌ Hangouts only work in a server.", ephemeral=True
+        )
+        return
+
+    code = id.strip().upper()
+    row = await get_hangout(interaction.guild.id, code)
+    if not row:
+        await interaction.response.send_message(
+            "❌ No hangout found with that ID.", ephemeral=True
+        )
+        return
+    if row["creator_id"] != interaction.user.id:
+        await interaction.response.send_message(
+            "❌ Only the creator can announce.", ephemeral=True
+        )
+        return
+    if row["closed"]:
+        await interaction.response.send_message(
+            "❌ This hangout has ended.", ephemeral=True
+        )
+        return
+
+    text = (message or "").strip()
+    if not text:
+        await interaction.response.send_message(
+            "❌ Message can’t be empty.", ephemeral=True
+        )
+        return
+    if len(text) > 1000:
+        await interaction.response.send_message(
+            "❌ Keep the message under 1000 characters.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    attendee_ids = await get_hangout_attendee_ids(interaction.guild.id, code)
+    sent = 0
+    failed = 0
+    body = (
+        f"**Hangout update** — **{row['title']}** (`{code}`)\n"
+        f"{text}"
+    )
+    for uid in attendee_ids:
+        if uid == interaction.user.id:
+            continue
+        member = interaction.guild.get_member(uid)
+        if member is None:
+            try:
+                member = await interaction.guild.fetch_member(uid)
+            except Exception:
+                failed += 1
+                continue
+        try:
+            await member.send(body)
+            sent += 1
+        except Exception:
+            failed += 1
+
+    await interaction.followup.send(
+        f"📢 Announcement sent.\n-# Delivered: **{sent}** · Couldn’t DM: **{failed}**",
+        ephemeral=True,
+    )
+
+
+tree.add_command(hangout_group)
+
+
+@tasks.loop(minutes=1)
+async def hangout_loop():
+    """Remind 5 minutes before start; auto-close 30 minutes after start."""
+    await ensure_db()
+    now = utcnow().replace(tzinfo=None)
+    remind_until = now + timedelta(minutes=HANGOUT_REMIND_MINUTES)
+    close_before = now - timedelta(minutes=HANGOUT_CLOSE_MINUTES)
+
+    async with pool.acquire() as conn:
+        # Reminders
+        to_remind = await conn.fetch(
+            """
+            SELECT * FROM hangouts
+            WHERE closed = FALSE
+              AND reminded = FALSE
+              AND starts_at > $1
+              AND starts_at <= $2
+            """,
+            now,
+            remind_until,
+        )
+        # Closures
+        to_close = await conn.fetch(
+            """
+            SELECT guild_id, hangout_id, title FROM hangouts
+            WHERE closed = FALSE
+              AND starts_at <= $1
+            """,
+            close_before,
+        )
+
+    for row in to_remind:
+        guild = bot.get_guild(row["guild_id"])
+        attendee_ids = await get_hangout_attendee_ids(
+            row["guild_id"], row["hangout_id"]
+        )
+        unix = hangout_starts_unix(row)
+        body = (
+            f"⏰ **Hangout soon**\n"
+            f"**{row['title']}** starts <t:{unix}:R>.\n"
+            f"-# ID: `{row['hangout_id']}`"
+        )
+        for uid in attendee_ids:
+            member = None
+            if guild:
+                member = guild.get_member(uid)
+            if member is None and guild:
+                try:
+                    member = await guild.fetch_member(uid)
+                except Exception:
+                    continue
+            if member is None:
+                continue
+            try:
+                await member.send(body)
+            except Exception:
+                pass
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE hangouts SET reminded = TRUE
+                WHERE guild_id = $1 AND hangout_id = $2
+                """,
+                row["guild_id"],
+                row["hangout_id"],
+            )
+
+    for row in to_close:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE hangouts SET closed = TRUE
+                WHERE guild_id = $1 AND hangout_id = $2
+                """,
+                row["guild_id"],
+                row["hangout_id"],
+            )
+        log.info(
+            "Closed hangout %s in guild %s",
+            row["hangout_id"],
+            row["guild_id"],
+        )
+
+
+@hangout_loop.before_loop
+async def before_hangout_loop():
+    await bot.wait_until_ready()
 
 
 # -----------------------------------------

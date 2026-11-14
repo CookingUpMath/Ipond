@@ -3162,8 +3162,11 @@ async def hangout(
     # ----- list -----
     if act == "list":
         await ensure_db()
+        guild_id = interaction.guild.id
+        user_id = interaction.user.id
+
         async with pool.acquire() as conn:
-            rows = await conn.fetch(
+            attending_rows = await conn.fetch(
                 """
                 SELECT h.*
                 FROM hangouts h
@@ -3173,27 +3176,59 @@ async def hangout(
                   AND a.user_id = $2
                   AND h.closed = FALSE
                 ORDER BY h.starts_at ASC
-                LIMIT 25
+                LIMIT 50
                 """,
-                interaction.guild.id,
-                interaction.user.id,
+                guild_id,
+                user_id,
             )
-        if not rows:
-            await interaction.response.send_message(
-                "You’re not attending any open hangouts.\n"
-                "-# Use `/hangout` → **Create**, or **View** with an ID to join.",
-                ephemeral=True,
+            # Public only — never private, skip ones the user already attends
+            # so the list has no duplicates. Upcoming first. Cap 50.
+            public_rows = await conn.fetch(
+                """
+                SELECT h.*
+                FROM hangouts h
+                WHERE h.guild_id = $1
+                  AND h.is_public = TRUE
+                  AND h.closed = FALSE
+                  AND NOT EXISTS (
+                      SELECT 1 FROM hangout_attendees a
+                      WHERE a.guild_id = h.guild_id
+                        AND a.hangout_id = h.hangout_id
+                        AND a.user_id = $2
+                  )
+                ORDER BY h.starts_at ASC
+                LIMIT 50
+                """,
+                guild_id,
+                user_id,
             )
-            return
-        lines = []
-        for row in rows:
-            unix = hangout_starts_unix(row)
-            lines.append(
-                f"`{row['hangout_id']}` **{row['title']}** — <t:{unix}:f> (<t:{unix}:R>)"
-            )
+
+        parts: list[str] = []
+
+        parts.append("# ✅ Attending")
+        if attending_rows:
+            for row in attending_rows:
+                unix = hangout_starts_unix(row)
+                parts.append(
+                    f"`{row['hangout_id']}` **{row['title']}** — Starts <t:{unix}:R>"
+                )
+        else:
+            parts.append("-# You’re not attending any open hangouts.")
+
+        parts.append("")
+        parts.append("# 👤 Public")
+        if public_rows:
+            for row in public_rows:
+                unix = hangout_starts_unix(row)
+                # Medium date+time, no relative in brackets
+                parts.append(
+                    f"`{row['hangout_id']}` **{row['title']}** — <t:{unix}:f>"
+                )
+        else:
+            parts.append("-# No upcoming public hangouts.")
+
         embed = discord.Embed(
-            title="Your hangouts",
-            description="\n".join(lines),
+            description="\n".join(parts),
             color=discord.Color.blurple(),
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)

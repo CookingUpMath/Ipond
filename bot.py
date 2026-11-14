@@ -3090,119 +3090,25 @@ class HangoutCreateModal(discord.ui.Modal, title="Create a Hangout"):
         )
 
 
-hangout_group = app_commands.Group(
-    name="hangout",
-    description="Create and join simple hangouts",
-)
-
-
-@hangout_group.command(name="create", description="Create a hangout")
-async def hangout_create(interaction: discord.Interaction):
-    if interaction.guild is None:
-        await interaction.response.send_message(
-            "❌ Hangouts only work in a server.", ephemeral=True
-        )
-        return
-
-    color = None
-    if isinstance(interaction.user, discord.Member):
-        c = interaction.user.color
-        if c and c.value != 0:
-            color = c.value
-
-    await interaction.response.send_modal(
-        HangoutCreateModal(creator_id=interaction.user.id, color=color)
-    )
-
-
-@hangout_group.command(name="view", description="View a hangout by ID")
-@app_commands.describe(id="4-character hangout ID")
-async def hangout_view(interaction: discord.Interaction, id: str):
-    if interaction.guild is None:
-        await interaction.response.send_message(
-            "❌ Hangouts only work in a server.", ephemeral=True
-        )
-        return
-
-    code = id.strip().upper()
-    row = await get_hangout(interaction.guild.id, code)
-    if not row:
-        await interaction.response.send_message(
-            "❌ No hangout found with that ID.", ephemeral=True
-        )
-        return
-
-    attendees = await get_hangout_attendee_ids(interaction.guild.id, code)
-    embed = build_hangout_embed(row, attendee_count=len(attendees))
-    view = HangoutAttendView(code) if not row["closed"] else None
-    if view:
-        bot.add_view(view)
-
-    # Private hangouts → ephemeral view only
-    ephemeral = not row["is_public"]
-    await interaction.response.send_message(
-        embed=embed, view=view, ephemeral=ephemeral
-    )
-
-
-@hangout_group.command(name="list", description="Hangouts you’re attending")
-async def hangout_list(interaction: discord.Interaction):
-    if interaction.guild is None:
-        await interaction.response.send_message(
-            "❌ Hangouts only work in a server.", ephemeral=True
-        )
-        return
-
-    await ensure_db()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT h.*
-            FROM hangouts h
-            JOIN hangout_attendees a
-              ON a.guild_id = h.guild_id AND a.hangout_id = h.hangout_id
-            WHERE h.guild_id = $1
-              AND a.user_id = $2
-              AND h.closed = FALSE
-            ORDER BY h.starts_at ASC
-            LIMIT 25
-            """,
-            interaction.guild.id,
-            interaction.user.id,
-        )
-
-    if not rows:
-        await interaction.response.send_message(
-            "You’re not attending any open hangouts.\n"
-            "-# Create one with `/hangout create` or join with `/hangout view <id>`.",
-            ephemeral=True,
-        )
-        return
-
-    lines = []
-    for row in rows:
-        unix = hangout_starts_unix(row)
-        lines.append(
-            f"`{row['hangout_id']}` **{row['title']}** — <t:{unix}:f> (<t:{unix}:R>)"
-        )
-    embed = discord.Embed(
-        title="Your hangouts",
-        description="\n".join(lines),
-        color=discord.Color.blurple(),
-    )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-@hangout_group.command(
-    name="announce",
-    description="DM a message to everyone attending your hangout",
-)
+@tree.command(name="hangout", description="Create and join simple hangouts")
 @app_commands.describe(
-    id="4-character hangout ID",
-    message="Message to send to attendees",
+    action="What do you want to do?",
+    id="Hangout ID (needed for view / announce)",
+    message="Message to attendees (needed for announce)",
 )
-async def hangout_announce(
-    interaction: discord.Interaction, id: str, message: str
+@app_commands.choices(
+    action=[
+        app_commands.Choice(name="Create", value="create"),
+        app_commands.Choice(name="View", value="view"),
+        app_commands.Choice(name="List", value="list"),
+        app_commands.Choice(name="Announce", value="announce"),
+    ]
+)
+async def hangout(
+    interaction: discord.Interaction,
+    action: app_commands.Choice[str],
+    id: str | None = None,
+    message: str | None = None,
 ):
     if interaction.guild is None:
         await interaction.response.send_message(
@@ -3210,67 +3116,156 @@ async def hangout_announce(
         )
         return
 
-    code = id.strip().upper()
-    row = await get_hangout(interaction.guild.id, code)
-    if not row:
-        await interaction.response.send_message(
-            "❌ No hangout found with that ID.", ephemeral=True
-        )
-        return
-    if row["creator_id"] != interaction.user.id:
-        await interaction.response.send_message(
-            "❌ Only the creator can announce.", ephemeral=True
-        )
-        return
-    if row["closed"]:
-        await interaction.response.send_message(
-            "❌ This hangout has ended.", ephemeral=True
+    act = action.value
+
+    # ----- create -----
+    if act == "create":
+        color = None
+        if isinstance(interaction.user, discord.Member):
+            c = interaction.user.color
+            if c and c.value != 0:
+                color = c.value
+        await interaction.response.send_modal(
+            HangoutCreateModal(creator_id=interaction.user.id, color=color)
         )
         return
 
-    text = (message or "").strip()
-    if not text:
+    # ----- view -----
+    if act == "view":
+        if not id or not id.strip():
+            await interaction.response.send_message(
+                "❌ Provide the hangout **id** to view.\n"
+                "-# Example: `/hangout` → View → id: `A7K2`",
+                ephemeral=True,
+            )
+            return
+        code = id.strip().upper()
+        row = await get_hangout(interaction.guild.id, code)
+        if not row:
+            await interaction.response.send_message(
+                "❌ No hangout found with that ID.", ephemeral=True
+            )
+            return
+        attendees = await get_hangout_attendee_ids(interaction.guild.id, code)
+        embed = build_hangout_embed(row, attendee_count=len(attendees))
+        view = HangoutAttendView(code) if not row["closed"] else None
+        if view:
+            bot.add_view(view)
+        ephemeral = not row["is_public"]
         await interaction.response.send_message(
-            "❌ Message can’t be empty.", ephemeral=True
-        )
-        return
-    if len(text) > 1000:
-        await interaction.response.send_message(
-            "❌ Keep the message under 1000 characters.", ephemeral=True
+            embed=embed, view=view, ephemeral=ephemeral
         )
         return
 
-    await interaction.response.defer(ephemeral=True)
-    attendee_ids = await get_hangout_attendee_ids(interaction.guild.id, code)
-    sent = 0
-    failed = 0
-    body = (
-        f"**Hangout update** — **{row['title']}** (`{code}`)\n"
-        f"{text}"
-    )
-    for uid in attendee_ids:
-        if uid == interaction.user.id:
-            continue
-        member = interaction.guild.get_member(uid)
-        if member is None:
+    # ----- list -----
+    if act == "list":
+        await ensure_db()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT h.*
+                FROM hangouts h
+                JOIN hangout_attendees a
+                  ON a.guild_id = h.guild_id AND a.hangout_id = h.hangout_id
+                WHERE h.guild_id = $1
+                  AND a.user_id = $2
+                  AND h.closed = FALSE
+                ORDER BY h.starts_at ASC
+                LIMIT 25
+                """,
+                interaction.guild.id,
+                interaction.user.id,
+            )
+        if not rows:
+            await interaction.response.send_message(
+                "You’re not attending any open hangouts.\n"
+                "-# Use `/hangout` → **Create**, or **View** with an ID to join.",
+                ephemeral=True,
+            )
+            return
+        lines = []
+        for row in rows:
+            unix = hangout_starts_unix(row)
+            lines.append(
+                f"`{row['hangout_id']}` **{row['title']}** — <t:{unix}:f> (<t:{unix}:R>)"
+            )
+        embed = discord.Embed(
+            title="Your hangouts",
+            description="\n".join(lines),
+            color=discord.Color.blurple(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    # ----- announce -----
+    if act == "announce":
+        if not id or not id.strip():
+            await interaction.response.send_message(
+                "❌ Provide the hangout **id** to announce to.",
+                ephemeral=True,
+            )
+            return
+        text = (message or "").strip()
+        if not text:
+            await interaction.response.send_message(
+                "❌ Provide a **message** for attendees.",
+                ephemeral=True,
+            )
+            return
+        if len(text) > 1000:
+            await interaction.response.send_message(
+                "❌ Keep the message under 1000 characters.",
+                ephemeral=True,
+            )
+            return
+
+        code = id.strip().upper()
+        row = await get_hangout(interaction.guild.id, code)
+        if not row:
+            await interaction.response.send_message(
+                "❌ No hangout found with that ID.", ephemeral=True
+            )
+            return
+        if row["creator_id"] != interaction.user.id:
+            await interaction.response.send_message(
+                "❌ Only the creator can announce.", ephemeral=True
+            )
+            return
+        if row["closed"]:
+            await interaction.response.send_message(
+                "❌ This hangout has ended.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        attendee_ids = await get_hangout_attendee_ids(interaction.guild.id, code)
+        sent = 0
+        failed = 0
+        body = (
+            f"**Hangout update** — **{row['title']}** (`{code}`)\n"
+            f"{text}"
+        )
+        for uid in attendee_ids:
+            if uid == interaction.user.id:
+                continue
+            member = interaction.guild.get_member(uid)
+            if member is None:
+                try:
+                    member = await interaction.guild.fetch_member(uid)
+                except Exception:
+                    failed += 1
+                    continue
             try:
-                member = await interaction.guild.fetch_member(uid)
+                await member.send(body)
+                sent += 1
             except Exception:
                 failed += 1
-                continue
-        try:
-            await member.send(body)
-            sent += 1
-        except Exception:
-            failed += 1
+        await interaction.followup.send(
+            f"📢 Announcement sent.\n-# Delivered: **{sent}** · Couldn’t DM: **{failed}**",
+            ephemeral=True,
+        )
+        return
 
-    await interaction.followup.send(
-        f"📢 Announcement sent.\n-# Delivered: **{sent}** · Couldn’t DM: **{failed}**",
-        ephemeral=True,
-    )
-
-
-tree.add_command(hangout_group)
 
 
 @tasks.loop(minutes=1)

@@ -50,6 +50,41 @@ EMOJI_POWERS_TITLE = (
     "<:P4:1571190309726195763>"
     "<:P5:1571190308593606757>"
 )
+EMOJI_CURSE_TITLE = (
+    "<:Curse1:1571286924017012858>"
+    "<:Curse2:1571286926336589964>"
+    "<:Curse3:1571286927125254254>"
+    "<:Curse4:1571286927921905714>"
+    "<:Curse5:1571286925480824954>"
+)
+EMOJI_TARGET_TITLE = (
+    "<:Target1:1571286987346940076>"
+    "<:Target2:1571286986331918497>"
+    "<:Target3:1571286990031298590>"
+    "<:Target4:1571286990496993323>"
+    "<:Target5:1571286988647170210>"
+)
+EMOJI_JESTER_TITLE = (
+    "<:Jester1:1571287039775604948>"
+    "<:Jester2:1571287042300711042>"
+    "<:Jester3:1571287041550065784>"
+    "<:Jester4:1571287043198160936>"
+    "<:Jester5:1571287040610533537>"
+)
+EMOJI_MIME_TITLE = (
+    "<:Mime1:1571287087288946708>"
+    "<:Mime2:1571287090254188584>"
+    "<:Mime3:1571287089188835348>"
+    "<:Mime4:1571287091160158430>"
+    "<:Mime5:1571287092183699557>"
+)
+EMOJI_CRINGE_TITLE = (
+    "<:Cringe1:1571287157291618455>"
+    "<:Cringe2:1571287158269149204>"
+    "<:Cringe3:1571287156293378108>"
+    "<:Cringe4:1571287160852844565>"
+    "<:Cringe5:1571287159514726460>"
+)
 
 
 
@@ -1348,9 +1383,9 @@ async def curse(interaction: discord.Interaction, member: discord.Member):
     until_utc = reset_time.astimezone(timezone.utc)
     await set_active_effect(guild_id, "curse", member.id, until_utc)
 
-    embed = discord.Embed(color=discord.Color.red())
+    embed = discord.Embed(color=discord.Color.purple())
     embed.description = (
-        "# 🦆 Curse Applied\n"
+        f"# {EMOJI_CURSE_TITLE}\n"
         "-# Duration: Until daily reset\n"
         "-# Effect: 20% chance the bot **replies** with quack\n\n"
         f"**{member.mention}** has been **cursed**."
@@ -1397,9 +1432,9 @@ async def target(interaction: discord.Interaction, member: discord.Member):
     until_utc = reset_time.astimezone(timezone.utc)
     await set_active_effect(guild_id, "target", member.id, until_utc)
 
-    embed = discord.Embed(color=discord.Color.dark_gold())
+    embed = discord.Embed(color=discord.Color.from_str("#8B4513"))  # brown
     embed.description = (
-        "# 💩 Target Acquired\n"
+        f"# {EMOJI_TARGET_TITLE}\n"
         "-# Duration: Until daily reset\n"
         "-# Effect: 20% chance their messages get 💩\n\n"
         f"The ducks were given **laxatives**.\n"
@@ -1433,9 +1468,9 @@ async def mime(interaction: discord.Interaction, member: discord.Member):
     until = utcnow() + timedelta(minutes=30)
     await set_active_effect(guild_id, "mime", member.id, until)
 
-    embed = discord.Embed(color=discord.Color.dark_gray())
+    embed = discord.Embed(color=discord.Color.from_str("#000000"))  # black
     embed.description = (
-        "# 🤐 Mime Applied\n"
+        f"# {EMOJI_MIME_TITLE}\n"
         "-# Duration: 30 minutes\n"
         "-# Effect: Text over 5 characters is deleted after ~1s "
         "(emoji, stickers, images, and GIFs allowed)\n\n"
@@ -1506,9 +1541,9 @@ async def jester(interaction: discord.Interaction, member: discord.Member):
             except Exception as e:
                 log.warning("Failed to apply jester onto cringe nick: %s", e)
 
-    embed = discord.Embed(color=discord.Color.purple())
+    embed = discord.Embed(color=discord.Color.from_str("#FF69B4"))  # hot pink
     embed.description = (
-        "# 🤡 Jester Applied\n"
+        f"# {EMOJI_JESTER_TITLE}\n"
         "-# Duration: Until 5 minutes before daily reset\n"
         "-# Effect: Adds 🤡 to their nickname while active\n\n"
         f"**{member.mention}** has been **jestered**."
@@ -1626,9 +1661,9 @@ async def cringe(interaction: discord.Interaction, member: discord.Member):
     await set_cringe_effect(guild_id, member.id, original_nick, cringe_nick, until_utc)
 
     uses_left = CRINGE_MAX_USES - (uses + 1)
-    embed = discord.Embed(color=discord.Color.orange())
+    embed = discord.Embed(color=discord.Color.from_str("#FF0000"))  # red
     embed.description = (
-        "# \u2728 Cringe Applied\n"
+        f"# {EMOJI_CRINGE_TITLE}\n"
         "-# Duration: Until 5 minutes before daily reset\n"
         "-# Effect: Forced retro nickname (re-applies if they change it)\n\n"
         f"**{old_display}** is now {member.mention}\n"

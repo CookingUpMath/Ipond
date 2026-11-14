@@ -26,6 +26,33 @@ logging.basicConfig(
 )
 log = logging.getLogger("crown-bot")
 
+# Title graphics (application/server emojis — side-by-side banner)
+EMOJI_LB_TITLE = (
+    "<:Lb1:1571043671888101426>"
+    "<:Lb2:1571043673146269736>"
+    "<:Lb3:1571043674022739968>"
+    "<:Lb4:1571043676078080000>"
+    "<:Lb5:1571043677130854500>"
+    "<:Lb6:1571043677713997845>"
+    "<:Lb7:1571043675209863288>"
+)
+EMOJI_CROWN_TITLE = (
+    "<:C1:1571044410626539560>"
+    "<:C2:1571044411381649508>"
+    "<:C3:1571044412497203250>"
+    "<:C4:1571044413835182120>"
+    "<:C5:1571044414628040734>"
+)
+EMOJI_POWERS_TITLE = (
+    "<:P1:1571190312016290003>"
+    "<:P2:1571190307998015498>"
+    "<:P3:1571190313039564970>"
+    "<:P4:1571190309726195763>"
+    "<:P5:1571190308593606757>"
+)
+
+
+
 # -----------------------------------------
 # BOT + INTENTS
 # -----------------------------------------
@@ -758,15 +785,28 @@ async def perform_reset_for_guild(guild: discord.Guild, settings: dict, now: dat
         if settings["announce_channel_id"]:
             channel = guild.get_channel(settings["announce_channel_id"])
             if channel:
-                reset_hour = settings["reset_hour"]
-                reset_minute = settings["reset_minute"]
-                embed = discord.Embed(color=discord.Color.gold())
-                embed.description = (
-                    "# 🏆 Daily Champion\n"
-                    f"-# Reset Time: {reset_hour:02d}:{reset_minute:02d} {settings['timezone_str']}\n\n"
-                    f"👑 **<@{winner_id}>** is today's champion with **{top['count']} messages!**\n"
-                    f"-# 📝 +{STICKY_REWARD_ON_CROWN} stickies awarded"
+                # Next reset as Discord timestamp (short time for each viewer)
+                tz = get_tz(settings)
+                local_now = datetime.now(tz)
+                next_reset = local_now.replace(
+                    hour=settings["reset_hour"],
+                    minute=settings["reset_minute"],
+                    second=0,
+                    microsecond=0,
                 )
+                if next_reset <= local_now:
+                    next_reset += timedelta(days=1)
+                next_unix = int(next_reset.timestamp())
+
+                embed = discord.Embed(color=discord.Color.from_str("#F1B24F"))
+                embed.description = (
+                    f"# {EMOJI_CROWN_TITLE}\n"
+                    f"## All hail <@{winner_id}>!\n"
+                    f"Today’s champion with **{top['count']}** messages\n"
+                    f"-# Next reset: <t:{next_unix}:t>"
+                )
+                if winner_member:
+                    embed.set_thumbnail(url=winner_member.display_avatar.url)
                 try:
                     await channel.send(embed=embed)
                 except Exception as e:
@@ -829,9 +869,25 @@ async def daily_reset_loop_error(error):
 # LEADERBOARD
 # -----------------------------------------
 
+def _format_lb_lines(rows, guild, value_key: str) -> list[str]:
+    """Top 3 medal lines + ranks 4–10 as small text."""
+    lines: list[str] = []
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    for i, row in enumerate(rows, start=1):
+        user = guild.get_member(row["user_id"]) if guild else None
+        name = user.display_name if user else f"User {row['user_id']}"
+        value = row[value_key]
+        if i in medals:
+            lines.append(f"`{medals[i]}`** {name} - {value}**")
+        else:
+            lines.append(f"-# ▪️ {name} - {value}")
+    return lines
+
+
 @tree.command(name="leaderboard", description="View the daily and all-time leaderboards.")
 async def leaderboard(interaction: discord.Interaction):
     guild_id = interaction.guild_id
+    guild = interaction.guild
 
     await ensure_db()
     async with pool.acquire() as conn:
@@ -847,26 +903,6 @@ async def leaderboard(interaction: discord.Interaction):
             LIMIT 10
         """, guild_id)
 
-    daily_lines = []
-    for i, row in enumerate(daily_rows, start=1):
-        user = interaction.guild.get_member(row["user_id"])
-        name = user.display_name if user else f"User {row['user_id']}"
-        count = row["count"]
-
-        if i == 1:
-            daily_lines.append(f"** 🥇 {name} - {count} **")
-        elif i == 2:
-            daily_lines.append(f"** 🥈 {name} - {count} **")
-        elif i == 3:
-            daily_lines.append(f"** 🥉 {name} - {count} **")
-        else:
-            daily_lines.append(f"▪️ {name} - {count}")
-
-    if not daily_lines:
-        daily_lines.append("▪️ No messages today.")
-
-    await ensure_db()
-    async with pool.acquire() as conn:
         all_rows = await conn.fetch("""
             SELECT user_id, wins
             FROM all_time_wins
@@ -875,29 +911,20 @@ async def leaderboard(interaction: discord.Interaction):
             LIMIT 10
         """, guild_id)
 
-    all_lines = []
-    for i, row in enumerate(all_rows, start=1):
-        user = interaction.guild.get_member(row["user_id"])
-        name = user.display_name if user else f"User {row['user_id']}"
-        wins = row["wins"] if row else 0
+    daily_lines = _format_lb_lines(daily_rows, guild, "count")
+    if not daily_lines:
+        daily_lines = ["-# ▪️ No messages today."]
 
-        if i == 1:
-            all_lines.append(f"** 🥇 {name} - {wins} **")
-        elif i == 2:
-            all_lines.append(f"** 🥈 {name} - {wins} **")
-        elif i == 3:
-            all_lines.append(f"** 🥉 {name} - {wins} **")
-        else:
-            all_lines.append(f"▪️ {name} - {wins}")
-
+    all_lines = _format_lb_lines(all_rows, guild, "wins")
     if not all_lines:
-        all_lines.append("▪️ No champions yet.")
+        all_lines = ["-# ▪️ No champions yet."]
 
-    embed = discord.Embed(color=discord.Color.gold())
+    embed = discord.Embed(color=discord.Color.from_str("#FFA51F"))
     embed.description = (
-        "# 🗓️ Daily Leaderboard\n"
+        f"# {EMOJI_LB_TITLE}\n"
+        "-# — Today’s Top Chatters —\n"
         + "\n".join(daily_lines)
-        + "\n\n# 🏆 Overall Leaderboard\n"
+        + "\n\n-# — Overall Top Chatters —\n"
         + "\n".join(all_lines)
     )
 
@@ -968,26 +995,26 @@ async def stats(interaction: discord.Interaction, member: discord.Member | None 
 
     total_casted = curse_casted + mime_casted + jester_casted + cringe_casted + target_casted
 
-    user_color = user.color if user.color.value != 0 else discord.Color.blurple()
+    user_color = user.color if getattr(user, "color", None) and user.color.value != 0 else discord.Color.teal()
 
     embed = discord.Embed(color=user_color)
     embed.set_thumbnail(url=user.display_avatar.url)
 
     embed.description = (
-        f"# 🗯️ {user.display_name}'s Stats\n"
-        f"📝 Stickies: **{sticky_display}**\n"
-        f"🗓️ Messages Today: **{daily_count}**\n"
-        f"👑 Crowned: **{win_count}**\n"
-        f"⚡ Powers Used: **{total_casted}**\n"
-        f"## ⚡️ Royal Powers\n"
-        f"-# 🙊 Mime: **{mime_casted} | {mimed_on}**\n"
-        f"-# 🤡 Jester: **{jester_casted} | {jestered_on}**\n"
-        f"-# 🔮 Curse: **{curse_casted} | {cursed_on}**\n"
-        f"-# ✨ Cringe: **{cringe_casted} | {cringed_on}**\n"
-        f"-# 💩 Target: **{target_casted} | {targeted_on}**"
+        f"# {EMOJI_CROWN_TITLE}\n"
+        f"-# {user.mention}'s Stats\n"
+        f"`📝` Stickies:  **{sticky_display}**\n"
+        f"`💬` Today’s Messages: **{daily_count}**\n"
+        f"`👑` Crowned: **{win_count}**\n"
+        f"`🪄` Powers Used: **{total_casted}**\n"
+        f"# {EMOJI_POWERS_TITLE}\n"
+        f"`🙊` Mime: **{mime_casted}** | **{mimed_on}**\n"
+        f"`🤡` Jester:  **{jester_casted}** | **{jestered_on}**\n"
+        f"`🔮` Cursed:  **{curse_casted}** | **{cursed_on}**\n"
+        f"`✨` Cringe:  **{cringe_casted}** | **{cringed_on}**\n"
+        f"`💩` Target:  **{target_casted}** | **{targeted_on}**\n"
+        f"-# ⇥ Stats are **Sent** | **Received**"
     )
-
-    embed.set_footer(text="⚠️ Stats are Sent | Received")
 
     await interaction.response.send_message(embed=embed)
 

@@ -2783,8 +2783,125 @@ def build_hangout_embed(row, attendee_count: int | None = None) -> discord.Embed
     return embed
 
 
+HANGOUT_ATTENDEE_PAGE_SIZE = 50
+
+
+async def _hangout_attendee_page_embed(
+    guild: discord.Guild,
+    hangout_id: str,
+    creator_id: int,
+    title: str,
+    page: int,
+) -> tuple[discord.Embed, int, int]:
+    """
+    Build an ephemeral attendee-list embed for one page.
+    Returns (embed, page_index, total_pages).
+    """
+    ids = await get_hangout_attendee_ids(guild.id, hangout_id)
+    # Host first, then everyone else in stable order
+    ordered: list[int] = []
+    if creator_id in ids:
+        ordered.append(creator_id)
+    for uid in ids:
+        if uid != creator_id:
+            ordered.append(uid)
+
+    total = len(ordered)
+    total_pages = max(1, (total + HANGOUT_ATTENDEE_PAGE_SIZE - 1) // HANGOUT_ATTENDEE_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    start = page * HANGOUT_ATTENDEE_PAGE_SIZE
+    chunk = ordered[start : start + HANGOUT_ATTENDEE_PAGE_SIZE]
+
+    if not chunk:
+        body = "-# No one is attending yet."
+    else:
+        lines = []
+        for uid in chunk:
+            member = guild.get_member(uid)
+            label = member.mention if member else f"<@{uid}>"
+            if uid == creator_id:
+                lines.append(f"• {label} *(host)*")
+            else:
+                lines.append(f"• {label}")
+        body = "\n".join(lines)
+
+    header = f"👥 **Attending** — **{title}** (`{hangout_id}`)\n"
+    header += f"-# {total} member{'s' if total != 1 else ''}"
+    if total_pages > 1:
+        header += f" · Page {page + 1}/{total_pages}"
+
+    embed = discord.Embed(
+        description=f"{header}\n\n{body}",
+        color=discord.Color.blurple(),
+    )
+    return embed, page, total_pages
+
+
+class HangoutAttendeeListView(discord.ui.View):
+    """Ephemeral pagination for the attendee list (not persistent)."""
+
+    def __init__(
+        self,
+        hangout_id: str,
+        creator_id: int,
+        title: str,
+        page: int,
+        total_pages: int,
+    ):
+        super().__init__(timeout=180)
+        self.hangout_id = hangout_id.upper()
+        self.creator_id = creator_id
+        self.title = title
+        self.page = page
+        self.total_pages = total_pages
+        self._sync_buttons()
+
+    def _sync_buttons(self):
+        self.clear_items()
+        if self.total_pages <= 1:
+            return
+        prev_btn = discord.ui.Button(
+            label="Previous",
+            style=discord.ButtonStyle.secondary,
+            emoji="◀️",
+            disabled=self.page <= 0,
+        )
+        next_btn = discord.ui.Button(
+            label="Next",
+            style=discord.ButtonStyle.secondary,
+            emoji="▶️",
+            disabled=self.page >= self.total_pages - 1,
+        )
+        prev_btn.callback = self._prev
+        next_btn.callback = self._next
+        self.add_item(prev_btn)
+        self.add_item(next_btn)
+
+    async def _prev(self, interaction: discord.Interaction):
+        await self._goto(interaction, self.page - 1)
+
+    async def _next(self, interaction: discord.Interaction):
+        await self._goto(interaction, self.page + 1)
+
+    async def _goto(self, interaction: discord.Interaction, page: int):
+        if interaction.guild is None:
+            await interaction.response.defer()
+            return
+        embed, page, total_pages = await _hangout_attendee_page_embed(
+            interaction.guild,
+            self.hangout_id,
+            self.creator_id,
+            self.title,
+            page,
+        )
+        self.page = page
+        self.total_pages = total_pages
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
 class HangoutAttendView(discord.ui.View):
-    """Persistent attend/leave controls for a hangout."""
+    """Persistent attend/leave/who's-going controls for a hangout."""
 
     def __init__(self, hangout_id: str):
         super().__init__(timeout=None)
@@ -2801,16 +2918,56 @@ class HangoutAttendView(discord.ui.View):
             emoji="🚪",
             custom_id=f"hangout:{self.hangout_id}:leave",
         )
+        list_btn = discord.ui.Button(
+            label="Who’s going?",
+            style=discord.ButtonStyle.primary,
+            emoji="👥",
+            custom_id=f"hangout:{self.hangout_id}:list",
+        )
         attend_btn.callback = self._attend
         leave_btn.callback = self._leave
+        list_btn.callback = self._list
         self.add_item(attend_btn)
         self.add_item(leave_btn)
+        self.add_item(list_btn)
 
     async def _attend(self, interaction: discord.Interaction):
         await self._handle(interaction, joining=True)
 
     async def _leave(self, interaction: discord.Interaction):
         await self._handle(interaction, joining=False)
+
+    async def _list(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "❌ Hangouts only work in a server.", ephemeral=True
+            )
+            return
+
+        row = await get_hangout(interaction.guild.id, self.hangout_id)
+        if not row:
+            await interaction.response.send_message(
+                "❌ That hangout doesn’t exist.", ephemeral=True
+            )
+            return
+
+        embed, page, total_pages = await _hangout_attendee_page_embed(
+            interaction.guild,
+            self.hangout_id,
+            int(row["creator_id"]),
+            row["title"],
+            0,
+        )
+        view = HangoutAttendeeListView(
+            hangout_id=self.hangout_id,
+            creator_id=int(row["creator_id"]),
+            title=row["title"],
+            page=page,
+            total_pages=total_pages,
+        )
+        await interaction.response.send_message(
+            embed=embed, view=view if total_pages > 1 else None, ephemeral=True
+        )
 
     async def _handle(self, interaction: discord.Interaction, joining: bool):
         if interaction.guild is None:

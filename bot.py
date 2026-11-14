@@ -2726,30 +2726,32 @@ def build_hangout_embed(row, attendee_count: int | None = None) -> discord.Embed
     else:
         color = discord.Color.blurple()
 
-    status = "Closed" if row["closed"] else "Open"
     visibility = "Public" if row["is_public"] else "Private"
+    attending = 0 if attendee_count is None else int(attendee_count)
 
     desc = (row["description"] or "").strip()
     if len(desc) > 400:
         desc = desc[:397] + "…"
 
+    # Discord timestamps auto-convert to each viewer's local timezone:
+    # :D = date only, :t = time only, :R = relative
     lines = [
         desc,
         "",
-        f"**When:** <t:{unix}:F>",
-        f"**Starts:** <t:{unix}:R>",
-        f"**Visibility:** {visibility}",
-        f"**Status:** {status}",
+        f"-# 🗓️ When: <t:{unix}:D>",
+        f"-# ⏰ Time: <t:{unix}:t>",
+        f"-# ⚡️ Starts: <t:{unix}:R>",
+        f"-# 👁️ Visible: {visibility}",
+        f"-# 👤 Attending: {attending}",
+        "",
+        f"-# ID: `{row['hangout_id']}`",
     ]
-    if attendee_count is not None:
-        lines.append(f"**Attending:** {attendee_count}")
 
     embed = discord.Embed(
         title=row["title"],
         description="\n".join(lines),
         color=color,
     )
-    embed.set_footer(text=row["hangout_id"])
     return embed
 
 
